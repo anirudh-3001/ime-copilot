@@ -67,29 +67,53 @@ class AzureOpenAIProvider:
 
 
 class LocalProvider:
-    """A model running on this machine (Ollama, LM Studio, vLLM...) via its OpenAI-style API.
+    """A model on this machine. For Ollama, uses its native /api/chat so we can set the
+    context window, turn off thinking and force JSON output."""
 
-    Nothing leaves the machine. Default: Ollama at http://localhost:11434/v1.
-    model_id is the local model name, e.g. gemma4:26b-a4b or qwen3-embedding:0.6b.
-    """
-
-    def __init__(self, base_url: str = "http://localhost:11434/v1", client=None, timeout: float = 600):
+    def __init__(self, base_url: str = "http://localhost:11434/v1", client=None, timeout: float = 600,
+                 num_ctx: int = 16384):
+        self.timeout, self.num_ctx, self.native_url, self._think_ok = timeout, num_ctx, None, True
         if client is not None:
             self.client = client
             return
-        from openai import OpenAI  # pip install openai
+        from openai import OpenAI
         self.client = OpenAI(base_url=base_url, api_key="local", timeout=timeout, max_retries=0)
+        if ":11434" in base_url:
+            self.native_url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
 
-    def complete(self, model_id: str, system: str, user: str, max_tokens: int) -> tuple[str, int, int]:
+    def complete(self, model_id, system, user, max_tokens):
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if self.native_url:
+            return self._ollama_chat(model_id, messages, max(max_tokens, 1000))
         resp = self.client.chat.completions.create(
-            model=model_id, temperature=0, max_tokens=max(max_tokens, 1000),
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        text = resp.choices[0].message.content or ""
-        usage = resp.usage
-        return text, getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0
+            model=model_id, temperature=0, max_tokens=max(max_tokens, 1000), messages=messages)
+        u = resp.usage
+        return (resp.choices[0].message.content or ""), getattr(u, "prompt_tokens", 0) or 0, \
+            getattr(u, "completion_tokens", 0) or 0
 
-    def embed(self, model_id: str, texts: list[str]) -> tuple[list[list[float]], int]:
+    def _ollama_chat(self, model_id, messages, max_tokens):
+        import urllib.error, urllib.request
+        body = {"model": model_id, "messages": messages, "stream": False, "format": "json",
+                "options": {"temperature": 0, "num_ctx": self.num_ctx, "num_predict": max_tokens}}
+        if self._think_ok:
+            body["think"] = False
+        req = urllib.request.Request(self.native_url, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode(errors="replace")[:200]
+            if self._think_ok and "think" in detail.lower():
+                self._think_ok = False
+                return self._ollama_chat(model_id, messages, max_tokens)
+            raise RuntimeError(f"Ollama error {err.code}: {detail}") from err
+        except urllib.error.URLError as err:
+            raise RuntimeError(f"Connection error: {err.reason}") from err
+        text = (data.get("message") or {}).get("content") or ""
+        return text, data.get("prompt_eval_count", 0) or 0, data.get("eval_count", 0) or 0
+
+    def embed(self, model_id, texts):
         resp = self.client.embeddings.create(model=model_id, input=texts)
         return [d.embedding for d in resp.data], getattr(getattr(resp, "usage", None), "prompt_tokens", 0) or 0
 
@@ -207,7 +231,7 @@ class Gateway:
             s = self.settings
             try:
                 if name == "local":
-                    self._providers[name] = LocalProvider(s.local_base_url)
+                    self._providers[name] = LocalProvider(s.local_base_url, num_ctx=s.local_num_ctx)
                 elif name == "azure_openai":
                     self._providers[name] = AzureOpenAIProvider(s.azure_openai_endpoint, s.azure_openai_api_key)
                 elif name == "foundry_claude":
@@ -297,5 +321,5 @@ def parse_json(text: str) -> Any:
         pass
     match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
     if not match:
-        raise ValueError("Model reply contained no JSON.")
+        raise ValueError(f"Model reply contained no JSON ({len(text)} characters returned).")
     return json.loads(match.group(1))

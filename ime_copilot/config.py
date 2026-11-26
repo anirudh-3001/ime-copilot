@@ -65,6 +65,7 @@ class Settings:
     ocr: str = "auto"                  # auto | pdftext | tesseract | azure_di | textract
     extractor: str = "rules"           # rules | llm
     provider: str = "none"             # none | local | azure_openai | foundry_claude | bedrock
+    local_num_ctx: int = 16384
     local_base_url: str = "http://localhost:11434/v1"   # Ollama (or LM Studio, vLLM) on this machine
     storage: str = "local"             # local | azure_blob
     local_storage_dir: str = "data/blobs"
@@ -120,6 +121,7 @@ class Settings:
             extractor=_env("IME_EXTRACTOR", cls.extractor),
             provider=provider,
             local_base_url=_env("IME_LOCAL_BASE_URL", cls.local_base_url),
+            local_num_ctx=int(_env("IME_LOCAL_NUM_CTX", str(cls.local_num_ctx))),
             storage=_env("IME_STORAGE", cls.storage),
             local_storage_dir=_env("IME_LOCAL_STORAGE_DIR", cls.local_storage_dir),
             max_upload_mb=int(_env("IME_MAX_UPLOAD_MB", str(cls.max_upload_mb))),
