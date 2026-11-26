@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import threading
 
 from ..db import get_ledger, get_pages
 from ..gateway import Gateway
 from ..schemas import Citation, Page, PageTable, ServiceRow
 from .qa import CaseQA
+from .store import DiskVectorCache, index_path
 
 _CACHE: dict[str, CaseQA] = {}
 
@@ -33,14 +35,29 @@ def load_case(engine, case_id: str) -> tuple[list[Page], list[ServiceRow]]:
     return pages, services
 
 
-def get_qa(engine, case_id: str, settings, refresh: bool = False) -> CaseQA:
-    if refresh or case_id not in _CACHE:
-        pages, services = load_case(engine, case_id)
-        if not pages:
-            raise KeyError(f"Case '{case_id}' has not been processed yet.")
-        gateway = Gateway(settings, engine=engine, case_id=case_id) if settings.provider != "none" else None
-        _CACHE[case_id] = CaseQA(pages, services, gateway)
-    return _CACHE[case_id]
+_LOCK = threading.Lock()
+
+
+def get_qa(engine, case_id: str, settings, refresh: bool = False, on_progress=None) -> CaseQA:
+    """The Q&A engine for a case. Search vectors are loaded from disk (data/index), and only
+    passages not seen before are embedded, so a big file is indexed once."""
+    with _LOCK:
+        if refresh or case_id not in _CACHE:
+            pages, services = load_case(engine, case_id)
+            if not pages:
+                raise KeyError(f"Case '{case_id}' has not been processed yet.")
+            gateway = Gateway(settings, engine=engine, case_id=case_id) if settings.provider != "none" else None
+            cache = None
+            embed_model = settings.models.get("embed")
+            if gateway is not None and embed_model:
+                cache = DiskVectorCache(index_path(settings.index_dir, case_id, embed_model))
+            _CACHE[case_id] = CaseQA(pages, services, gateway, vector_cache=cache, on_progress=on_progress)
+        return _CACHE[case_id]
+
+
+def forget(case_id: str) -> None:
+    with _LOCK:
+        _CACHE.pop(case_id, None)
 
 
 def result_text(r) -> str:

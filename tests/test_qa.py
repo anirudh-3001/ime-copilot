@@ -110,3 +110,23 @@ def test_local_provider_uses_openai_style_client():
 
 def test_question_set_is_well_formed():
     assert len(QUESTIONS) >= 5 and all(q["pages"] for q in QUESTIONS)
+
+
+def test_local_provider_uses_ollama_native_api_with_json_and_context(monkeypatch):
+    import io
+    import json as _json
+    import urllib.request
+    sent = {}
+
+    def fake_urlopen(req, timeout=None):
+        sent["url"], sent["body"] = req.full_url, _json.loads(req.data)
+        reply = {"message": {"content": '{"ok": true}'}, "prompt_eval_count": 7, "eval_count": 3}
+        return io.BytesIO(_json.dumps(reply).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    p = LocalProvider("http://localhost:11434/v1", num_ctx=8192)
+    assert p.complete("gemma4:26b-a4b", "s", "u", 50) == ('{"ok": true}', 7, 3)
+    assert sent["url"] == "http://localhost:11434/api/chat"
+    body = sent["body"]
+    assert body["format"] == "json" and body["think"] is False and body["stream"] is False
+    assert body["options"]["num_ctx"] == 8192 and body["options"]["temperature"] == 0

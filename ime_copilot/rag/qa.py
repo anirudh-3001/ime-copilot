@@ -72,7 +72,7 @@ class CaseQA:
     """Holds one case's pages, ledger, search index and code mentions; answers questions."""
 
     def __init__(self, pages: list[Page], services: list[ServiceRow], gateway: Gateway | None = None,
-                 use_embeddings: bool = True, vector_cache: dict | None = None):
+                 use_embeddings: bool = True, vector_cache: dict | None = None, on_progress=None):
         self.pages = pages
         self.pages_by_no = {p.page_no: p for p in pages}
         self.services = services
@@ -82,7 +82,8 @@ class CaseQA:
         if use_embeddings and gateway is not None and gateway.has_model("embed"):
             embedder = gateway.embed
         try:
-            self.index = CaseIndex.build(pages, embedder=embedder, vector_cache=vector_cache)
+            self.index = CaseIndex.build(pages, embedder=embedder, vector_cache=vector_cache,
+                                         on_progress=on_progress)
         except GatewayError as err:        # e.g. Ollama not running: keyword search still works
             self.notes.append(f"Meaning-based search unavailable ({err}); using keyword search only.")
             self.index = CaseIndex.build(pages)
@@ -120,7 +121,7 @@ class CaseQA:
             result.answer, result.sources = self._extractive(question, hits)
 
         cited_pages = {s.page for s in result.sources}
-        why = codes_for_question(question, set(searched) | cited_pages, self.mentions, self.services)
+        why = codes_for_question(question, cited_pages or set(searched), self.mentions, self.services)
         in_doc = {m.code for m in self.mentions} | {s.cpt for s in self.services}
         for code in llm_codes:
             code = code.strip().upper()

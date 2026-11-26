@@ -113,9 +113,19 @@ def _ask(args, settings) -> int:
                          page_range=parse_range(args.pages))
     else:
         case_id = args.target
-    print(f"Indexing case '{case_id}' for search...", file=sys.stderr)
+    print(f"Loading case '{case_id}' (search index is saved after the first time)...", file=sys.stderr)
+    import time
+    t0, last = time.monotonic(), [-1]
+
+    def show(done: int, total: int) -> None:
+        if total and done < total and (done == 0 or done * 10 // total != last[0]):
+            last[0] = done * 10 // total
+            spent = time.monotonic() - t0
+            left = f", ~{spent / done * (total - done) / 60:.0f} min left" if done else ""
+            print(f"[index] {done}/{total} passages{left}", file=sys.stderr, flush=True)
+
     try:
-        qa = get_qa(engine, case_id, settings, refresh=True)
+        qa = get_qa(engine, case_id, settings, refresh=True, on_progress=show)
     except KeyError as err:
         print(err, file=sys.stderr)
         return 1

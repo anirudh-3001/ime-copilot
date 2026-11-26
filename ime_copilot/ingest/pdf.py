@@ -65,7 +65,9 @@ def parse_range(text: str | None) -> tuple[int, int] | None:
 def read_pages(pdf_path: str | Path, ocr_mode: str = "auto", aws_region: str = "us-east-1",
                di_client: Any = None, page_range: tuple[int, int] | None = None,
                workers: int | None = None, cache_dir: str | Path | None = None,
-               dpi: int = 300, progress: bool = True) -> tuple[list[Page], dict | None]:
+               dpi: int = 300, progress: bool = True,
+               on_progress: Any = None) -> tuple[list[Page], dict | None]:
+    """on_progress(stage, done, total) is called as pages are read ('reading') and OCR'd ('ocr')."""
     """Returns (pages, layout). layout is only produced by Document Intelligence."""
     pdf_path = Path(pdf_path)
 
@@ -80,7 +82,9 @@ def read_pages(pdf_path: str | Path, ocr_mode: str = "auto", aws_region: str = "
     numbers = list(range(start, end + 1))
 
     pages: dict[int, Page] = {}
-    for n in numbers:
+    for i, n in enumerate(numbers, 1):
+        if on_progress and (i % 50 == 0 or i == len(numbers)):
+            on_progress("reading", i, len(numbers))
         text = ""
         if ocr_mode in ("pdftext", "auto"):
             try:
@@ -98,7 +102,8 @@ def read_pages(pdf_path: str | Path, ocr_mode: str = "auto", aws_region: str = "
         todo = [n for n in numbers if ocr_mode == "tesseract" or len(pages[n].text) < MIN_TEXT_CHARS]
         if todo and tesseract_available():
             cache = _OcrCache(cache_dir, pdf_path, dpi) if cache_dir else None
-            for n, (text, conf) in _ocr_many(pdf_path, todo, workers, cache, dpi, progress).items():
+            for n, (text, conf) in _ocr_many(pdf_path, todo, workers, cache, dpi, progress,
+                                             on_progress).items():
                 pages[n] = Page(page_no=n, text=text, text_source="tesseract", ocr_confidence=conf)
         elif todo and progress:
             print(f"[ocr] {len(todo)} scanned pages found but Tesseract/Poppler are not installed; "
@@ -120,7 +125,7 @@ def tesseract_available() -> bool:
 
 
 def _ocr_many(pdf_path: Path, numbers: list[int], workers: int | None, cache: "_OcrCache | None",
-              dpi: int, progress: bool) -> dict[int, tuple[str, float | None]]:
+              dpi: int, progress: bool, on_progress: Any = None) -> dict[int, tuple[str, float | None]]:
     results: dict[int, tuple[str, float | None]] = {}
     todo = []
     for n in numbers:
@@ -132,6 +137,8 @@ def _ocr_many(pdf_path: Path, numbers: list[int], workers: int | None, cache: "_
     if progress:
         print(f"[ocr] {len(numbers)} pages need OCR: {len(numbers) - len(todo)} from cache, "
               f"{len(todo)} to run", file=sys.stderr, flush=True)
+    if on_progress:
+        on_progress("ocr", len(numbers) - len(todo), len(numbers))
     if not todo:
         return results
 
@@ -150,6 +157,8 @@ def _ocr_many(pdf_path: Path, numbers: list[int], workers: int | None, cache: "_
             if cache:
                 cache.put(n, *results[n])
             done += 1
+            if on_progress:
+                on_progress("ocr", len(numbers) - len(todo) + done, len(numbers))
             if progress and (done % 25 == 0 or done == len(todo)):
                 elapsed = time.monotonic() - started
                 rate = elapsed / done

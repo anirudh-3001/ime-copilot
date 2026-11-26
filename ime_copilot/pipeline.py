@@ -24,7 +24,8 @@ from .schemas import CaseResult
 def process_case(pdf_path: str | Path, case_id: str, settings: Settings,
                  provider: Provider | None = None, save: bool = True,
                  storage: Storage | None = None, di_client: Any = None,
-                 page_range: tuple[int, int] | None = None, progress: bool = True) -> CaseResult:
+                 page_range: tuple[int, int] | None = None, progress: bool = True,
+                 on_progress: Any = None) -> CaseResult:
     validate_case_id(case_id)
     engine = get_engine(settings.db_url) if save else None
     gateway = Gateway(settings, provider=provider, engine=engine, case_id=case_id)
@@ -39,7 +40,9 @@ def process_case(pdf_path: str | Path, case_id: str, settings: Settings,
     pages, layout = read_pages(
         pdf_path, settings.ocr, settings.aws_region, di_client=di_client, page_range=page_range,
         workers=settings.ocr_workers or None, cache_dir=settings.ocr_cache_dir or None,
-        dpi=settings.ocr_dpi, progress=progress)
+        dpi=settings.ocr_dpi, progress=progress, on_progress=on_progress)
+    if on_progress:
+        on_progress("analyzing", 0, 1)
     if storage is not None and layout is not None:
         storage.put(case_key(case_id, "layout.json"), json.dumps(layout).encode(), "application/json")
     mark_duplicates(pages)

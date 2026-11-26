@@ -129,6 +129,10 @@ def summarize(codes: set[str], mentions: list[CodeMention], services: list[Servi
     return out
 
 
+_NOT_BILLING = re.compile(r"\b(diagnos\w*|icd|dx|history|symptoms?|complaints?|restrictions?|work status|"
+                          r"medications?|allerg\w*|employer|insurer|claim number|date of (?:birth|injury))\b")
+
+
 def codes_for_question(question: str, retrieved_pages: set[int], mentions: list[CodeMention],
                        services: list[ServiceRow]) -> dict[str, str]:
     """Codes the question is about -> reason. Only codes that exist in the document qualify."""
@@ -151,6 +155,8 @@ def codes_for_question(question: str, retrieved_pages: set[int], mentions: list[
             why[code] = f"question is about {label.lower()}"
 
     if why:          # the question named a topic or codes: don't pad with every code on the same bill page
+        return why
+    if _NOT_BILLING.search(q):   # diagnoses, history, restrictions...: billing codes aren't the answer
         return why
     for m in mentions:
         if m.page_no in retrieved_pages and m.code not in why:

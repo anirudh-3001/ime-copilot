@@ -5,122 +5,369 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IME Copilot</title>
 <style>
-  :root { --bg:#f7f7f5; --card:#fff; --text:#1f1f1d; --muted:#6b6a65; --line:#e3e1da; --accent:#1d5fa8; --warn:#8a5a00; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#1b1b1a; --card:#252523; --text:#ecebe6; --muted:#a3a29c; --line:#3a3936; --accent:#7fb2ea; --warn:#e5b25c; } }
-  * { box-sizing: border-box; }
-  body { margin:0; font:15px/1.6 -apple-system, system-ui, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
-  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
-  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 20px; }
-  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-  h2 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
-  label { color: var(--muted); font-size: 13px; }
-  input[type=text], input[type=password], select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
-  textarea { min-height: 64px; resize: vertical; }
-  button { padding: 8px 16px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: .5; cursor: wait; }
-  .row { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
-  .row > div { flex: 1; min-width: 200px; }
-  .status { color: var(--muted); font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
-  .answer { white-space: pre-wrap; margin: 0 0 12px; }
-  table { width:100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; font-size: 13px; }
-  .q { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-  .warn { color: var(--warn); font-size: 13px; }
-  .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  :root {
+    --bg:#f5f4f0; --panel:#ffffff; --sunk:#efede7; --text:#1d1c1a; --muted:#6b6962; --line:#e2dfd6;
+    --accent:#1f5fa6; --accent-soft:#e6eef8; --ok:#2f7a4d; --ok-soft:#e5f2ea; --warn:#8a5a00; --warn-soft:#fbf1dc;
+    --mark:#fff0a8; --shadow:0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#171716; --panel:#21211f; --sunk:#1b1b1a; --text:#ecebe6; --muted:#a19f98; --line:#34332f;
+      --accent:#86b6ec; --accent-soft:#22303f; --ok:#79c79a; --ok-soft:#1f3328; --warn:#e7b65e; --warn-soft:#3a2f1b;
+      --mark:#5a4d12; --shadow:none; }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; font:15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", sans-serif;
+    background:var(--bg); color:var(--text); }
+  button { font:inherit; cursor:pointer; }
+  .app { display:grid; grid-template-columns: 300px 1fr; height:100vh; }
+  aside { border-right:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; min-height:0; }
+  .brand { padding:18px 18px 12px; }
+  .brand h1 { font-size:18px; margin:0; letter-spacing:-.01em; }
+  .brand p { margin:2px 0 0; color:var(--muted); font-size:12.5px; }
+  .local { display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:4px 9px; border-radius:999px;
+    background:var(--ok-soft); color:var(--ok); font-size:12px; font-weight:600; }
+  .local::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--ok); }
+  .drop { margin:6px 14px 10px; border:1.5px dashed var(--line); border-radius:12px; padding:14px; text-align:center;
+    color:var(--muted); font-size:13px; transition:.15s; }
+  .drop.over { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); }
+  .drop button { margin-top:8px; }
+  .btn { padding:8px 14px; border-radius:9px; border:1px solid transparent; background:var(--accent); color:#fff; font-weight:600; }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .btn.ghost { background:transparent; border-color:var(--line); color:var(--text); font-weight:500; }
+  .section-label { padding:8px 18px 4px; font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600; }
+  .cases { overflow:auto; padding:0 8px 12px; flex:1; }
+  .case { width:100%; text-align:left; background:none; border:0; color:inherit; padding:9px 10px; border-radius:9px; display:block; }
+  .case:hover { background:var(--sunk); }
+  .case.active { background:var(--accent-soft); }
+  .case b { display:block; font-weight:600; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .case span { color:var(--muted); font-size:12.5px; }
+  .job { margin:0 14px 10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:var(--sunk); font-size:13px; }
+  .job .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar { height:6px; border-radius:6px; background:var(--line); overflow:hidden; margin:8px 0 6px; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .4s; }
+  .bar.indeterminate i { width:30%; animation:slide 1.2s infinite ease-in-out; }
+  @keyframes slide { 0% { margin-left:-30%; } 100% { margin-left:100%; } }
+  .job .meta, .muted { color:var(--muted); font-size:12.5px; }
+  .job.error { border-color:var(--warn); background:var(--warn-soft); }
+  .foot { padding:10px 18px 14px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+  main { display:flex; flex-direction:column; min-width:0; min-height:0; }
+  .top { padding:14px 28px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .top h2 { margin:0; font-size:17px; }
+  .thread { flex:1; overflow:auto; padding:22px 28px 8px; }
+  .empty { max-width:620px; margin:8vh auto 0; text-align:center; color:var(--muted); }
+  .empty h3 { color:var(--text); font-size:20px; margin:0 0 6px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:16px; }
+  .chip { border:1px solid var(--line); background:var(--panel); color:var(--text); padding:7px 12px; border-radius:999px; font-size:13.5px; }
+  .chip:hover { border-color:var(--accent); color:var(--accent); }
+  .qa { max-width:860px; margin:0 auto 22px; }
+  .q { margin-left:auto; width:fit-content; max-width:80%; background:var(--accent); color:#fff; padding:9px 14px;
+    border-radius:16px 16px 4px 16px; margin-bottom:10px; }
+  @media (prefers-color-scheme: dark) { .q, .btn:not(.ghost) { color:#10161d; } }
+  .a { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow); }
+  .a .text { white-space:pre-wrap; }
+  .pg { display:inline-block; padding:0 6px; margin:0 1px; border-radius:6px; background:var(--accent-soft); color:var(--accent);
+    font-size:12.5px; font-weight:600; border:0; line-height:1.6; vertical-align:baseline; }
+  .pg:hover { outline:1px solid var(--accent); }
+  .a h4 { margin:16px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .tablewrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  td.code { font-family:ui-monospace, "SF Mono", Menlo, monospace; font-weight:600; }
+  td.num { font-variant-numeric:tabular-nums; }
+  .src { display:flex; gap:10px; align-items:flex-start; padding:7px 0; border-bottom:1px solid var(--line); font-size:13.5px; }
+  .src:last-child { border-bottom:0; }
+  .badges { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:14px; font-size:12px; color:var(--muted); }
+  .badge { padding:2px 8px; border-radius:999px; font-weight:600; }
+  .badge.ok { background:var(--ok-soft); color:var(--ok); }
+  .badge.warn { background:var(--warn-soft); color:var(--warn); }
+  .warning { margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--warn-soft); color:var(--warn); font-size:13px; }
+  .thinking { color:var(--muted); display:flex; gap:8px; align-items:center; }
+  .dots i { display:inline-block; width:6px; height:6px; margin-right:3px; border-radius:50%; background:var(--muted); animation:blink 1.2s infinite; }
+  .dots i:nth-child(2) { animation-delay:.2s; } .dots i:nth-child(3) { animation-delay:.4s; }
+  @keyframes blink { 0%,80%,100% { opacity:.2; } 40% { opacity:1; } }
+  .composer { padding:12px 28px 18px; }
+  .composer form { max-width:860px; margin:0 auto; display:flex; gap:10px; background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:8px 8px 8px 14px; box-shadow:var(--shadow); }
+  .composer textarea { flex:1; border:0; outline:0; resize:none; background:transparent; color:var(--text); font:inherit; padding:6px 0; max-height:140px; }
+  .composer form:focus-within { border-color:var(--accent); }
+  .viewer { position:fixed; top:0; right:0; height:100vh; width:min(560px, 100vw); background:var(--panel); border-left:1px solid var(--line);
+    box-shadow:-8px 0 24px rgba(0,0,0,.08); transform:translateX(100%); transition:transform .2s; display:flex; flex-direction:column; z-index:5; }
+  .viewer.open { transform:none; }
+  .viewer header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .viewer header h3 { margin:0; font-size:15px; flex:1; }
+  .viewer pre { margin:0; padding:18px; overflow:auto; flex:1; white-space:pre-wrap; font:13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; }
+  mark { background:var(--mark); color:inherit; border-radius:3px; padding:1px 0; }
+  .key { display:none; margin:0 14px 10px; }
+  .key input { width:100%; padding:7px 9px; border:1px solid var(--line); border-radius:8px; background:var(--sunk); color:var(--text); font:inherit; }
+  @media (max-width: 760px) {
+    .app { grid-template-columns:1fr; grid-template-rows:auto 1fr; height:auto; min-height:100vh; }
+    aside { border-right:0; border-bottom:1px solid var(--line); }
+    .cases { max-height:180px; }
+    .thread, .composer, .top { padding-left:16px; padding-right:16px; }
+    main { min-height:70vh; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>IME Copilot</h1>
-  <p class="sub">Ask questions about a claim file. Answers come with related CPT codes and the page numbers they come from.</p>
-
-  <section>
-    <h2>1. Upload a PDF</h2>
-    <div class="row">
-      <div><input type="file" id="file" accept="application/pdf"></div>
-      <div style="flex:0"><button id="upload">Upload and read</button></div>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <h1>IME Copilot</h1>
+      <p>Answers from the claim file, with CPT codes and page numbers.</p>
+      <div class="local" id="localBadge">Running on this computer</div>
     </div>
-    <div class="status" id="upStatus">Large files take a while the first time (OCR of scanned pages).</div>
-  </section>
-
-  <section>
-    <h2>2. Ask a question</h2>
-    <div class="row">
-      <div><label for="case">Case</label><select id="case"></select></div>
-      <div><label for="key">API key (only if set in .env)</label><input type="password" id="key"></div>
+    <div class="drop" id="drop">
+      Drop a PDF here
+      <div><button class="btn" id="pick">Choose PDF</button></div>
+      <input type="file" id="file" accept="application/pdf" hidden>
     </div>
-    <div style="margin-top:10px"><label for="question">Question</label>
-      <textarea id="question" placeholder="e.g. How many lumbar epidural injections were billed and on which dates?"></textarea></div>
-    <div style="margin-top:10px"><button id="ask">Ask</button></div>
-    <div class="status" id="askStatus"></div>
-  </section>
+    <div id="jobs"></div>
+    <div class="key" id="keyBox"><input type="password" id="key" placeholder="API key from .env" aria-label="API key"></div>
+    <div class="section-label">Case files</div>
+    <div class="cases" id="cases"></div>
+    <div class="foot" id="foot">Loading…</div>
+  </aside>
 
-  <div id="results"></div>
-</main>
+  <main>
+    <div class="top"><h2 id="caseTitle">No case selected</h2><span class="muted" id="caseMeta"></span></div>
+    <div class="thread" id="thread"></div>
+    <div class="composer">
+      <form id="askForm">
+        <textarea id="question" rows="1" placeholder="Ask about this file, e.g. What physical therapy was billed?" aria-label="Question"></textarea>
+        <button class="btn" id="askBtn" type="submit">Ask</button>
+      </form>
+    </div>
+  </main>
+</div>
+
+<div class="viewer" id="viewer" aria-hidden="true">
+  <header>
+    <button class="btn ghost" id="prevPg" aria-label="Previous page">‹</button>
+    <h3 id="vTitle">Page</h3>
+    <button class="btn ghost" id="nextPg" aria-label="Next page">›</button>
+    <button class="btn ghost" id="closeV">Close</button>
+  </header>
+  <pre id="vText"></pre>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
-const headers = () => { const k = $('key').value.trim(); return k ? {'X-API-Key': k} : {}; };
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = n => '$' + Number(n || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+const state = { cases: [], current: null, pageCount: 0, viewer: null, threads: {} };
+const jobs = {};
+const SUGGEST = [
+  'What physical therapy was billed?',
+  'How many lumbar epidural injections were billed and on which dates?',
+  'What did the MRI of the lumbar spine show?',
+  "What are the patient's diagnoses?",
+  'What office visits were billed?',
+  'What questions does the IME referral ask?'
+];
+
+function savedKey() { try { return localStorage.getItem('imeKey') || ''; } catch (e) { return ''; } }
+function headers(extra = {}) {
+  const k = $('key').value.trim() || savedKey();
+  return k ? {...extra, 'X-API-Key': k} : extra;
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, {...opts, headers: headers(opts.headers || {})});
+  let d = null; try { d = await r.json(); } catch (e) {}
+  if (r.status === 401) { $('keyBox').style.display = 'block'; throw new Error('Enter the API key from .env (left panel).'); }
+  if (!r.ok) throw new Error((d && d.detail) || ('HTTP ' + r.status));
+  return d;
+}
+$('key').addEventListener('change', () => { try { localStorage.setItem('imeKey', $('key').value.trim()); } catch (e) {} loadCases(); });
+
+async function loadHealth() {
+  try {
+    const h = await api('/health');
+    if (h.api_key_required) $('keyBox').style.display = 'block';
+    $('foot').innerHTML = `Answer model: <b>${esc(h.answer_model || 'none (search only)')}</b>` +
+      (h.embed_model ? `<br>Search model: ${esc(h.embed_model)}` : '') +
+      (h.escalation_model ? `<br>Escalation: ${esc(h.escalation_model)}` : '');
+    $('localBadge').style.display = (h.provider === 'local' && !h.escalation_model) ? '' : 'none';
+  } catch (e) { $('foot').textContent = 'Server not reachable.'; }
+}
 
 async function loadCases(select) {
-  const r = await fetch('/cases', {headers: headers()});
-  if (!r.ok) { $('askStatus').textContent = r.status === 401 ? 'Enter the API key from .env.' : 'Could not load cases.'; return; }
-  const cases = await r.json();
-  $('case').innerHTML = cases.map(c => `<option value="${esc(c.case_id)}">${esc(c.case_id)} (${c.page_count} pages)</option>`).join('')
-    || '<option value="">No cases yet: upload a PDF</option>';
-  if (select) $('case').value = select;
+  try { state.cases = await api('/cases'); }
+  catch (e) { $('cases').innerHTML = `<div class="muted" style="padding:8px 10px">${esc(e.message)}</div>`; return; }
+  const running = new Set(Object.keys(jobs).filter(id => jobs[id].stage !== 'error'));
+  const shown = state.cases.filter(c => !running.has(c.case_id));
+  $('cases').innerHTML = shown.map(c =>
+    `<button class="case${c.case_id === state.current ? ' active' : ''}" data-id="${esc(c.case_id)}">
+       <b>${esc(c.case_id)}</b><span>${Number(c.page_count).toLocaleString()} pages</span></button>`).join('')
+    || '<div class="muted" style="padding:8px 10px">No files yet. Upload a PDF above.</div>';
+  document.querySelectorAll('.case').forEach(b => b.onclick = () => selectCase(b.dataset.id));
+  if (select) selectCase(select);
+  else if (!state.current && shown.length) selectCase(shown[0].case_id);
 }
 
-$('upload').onclick = async () => {
-  const f = $('file').files[0];
-  if (!f) { $('upStatus').textContent = 'Choose a PDF first.'; return; }
-  const fd = new FormData();
-  fd.append('file', f);
-  fd.append('case_id', f.name.replace(/\.pdf$/i, '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64));
-  $('upload').disabled = true;
-  $('upStatus').textContent = 'Reading the PDF... (watch the terminal for OCR progress)';
-  try {
-    const r = await fetch('/cases', {method: 'POST', body: fd, headers: headers()});
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.status);
-    $('upStatus').textContent = `Done: ${d.pages} pages, ${d.service_lines} billed service lines, ${d.needs_review.length} pages need review.`;
-    await loadCases(d.case_id);
-  } catch (e) { $('upStatus').textContent = 'Upload failed: ' + e.message; }
-  $('upload').disabled = false;
-};
-
-$('ask').onclick = async () => {
-  const caseId = $('case').value, q = $('question').value.trim();
-  if (!caseId) { $('askStatus').textContent = 'Upload or pick a case first.'; return; }
-  if (!q) { $('askStatus').textContent = 'Type a question first.'; return; }
-  $('ask').disabled = true;
-  $('askStatus').textContent = 'Searching the document and writing the answer...';
-  try {
-    const r = await fetch(`/cases/${encodeURIComponent(caseId)}/ask`, {method: 'POST',
-      headers: {...headers(), 'Content-Type': 'application/json'}, body: JSON.stringify({question: q})});
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.status);
-    render(d);
-    $('askStatus').textContent = '';
-  } catch (e) { $('askStatus').textContent = 'Failed: ' + e.message; }
-  $('ask').disabled = false;
-};
-
-function render(d) {
-  const cpt = d.cpt_codes.length ? `<h2>CPT / HCPCS codes</h2><table><tr><th>Code</th><th>Type</th><th>Pages</th><th>Billed</th></tr>` +
-    d.cpt_codes.map(c => `<tr><td>${esc(c.code)}</td><td>${esc(c.category)}</td><td>${esc(c.pages.join(', '))}</td>
-      <td>${c.billed_lines ? `${c.billed_lines} line(s), ${c.units} unit(s), $${c.billed_total.toLocaleString(undefined,{minimumFractionDigits:2})}<br><span class="meta">${esc(c.first_date)} to ${esc(c.last_date)}</span>` : '-'}</td></tr>`).join('') + '</table>' : '';
-  const src = d.sources.length ? `<h2 style="margin-top:14px">Sources</h2><table><tr><th>Page</th><th>Quote</th></tr>` +
-    d.sources.map(s => `<tr><td>${s.page}</td><td>&ldquo;${esc(s.quote)}&rdquo;</td></tr>`).join('') + '</table>' : '';
-  const warn = d.warnings.map(w => `<div class="warn">${esc(w)}</div>`).join('');
-  const card = document.createElement('section');
-  card.innerHTML = `<div class="q">${esc(d.question)}</div><p class="answer">${esc(d.answer)}</p>${cpt}${src}${warn}
-    <div class="meta">${esc(d.method)}${d.model ? ' &middot; ' + esc(d.model) : ''} &middot; pages searched: ${esc(d.searched_pages.join(', '))}</div>`;
-  $('results').prepend(card);
+function selectCase(id) {
+  const c = state.cases.find(x => x.case_id === id);
+  state.current = id; state.pageCount = c ? c.page_count : 0;
+  $('caseTitle').textContent = id;
+  $('caseMeta').textContent = c ? `${Number(c.page_count).toLocaleString()} pages` : '';
+  document.querySelectorAll('.case').forEach(b => b.classList.toggle('active', b.dataset.id === id));
+  renderThread();
+  $('question').focus();
 }
-loadCases();
+
+function renderThread() {
+  const t = $('thread');
+  const items = state.threads[state.current] || [];
+  if (!state.current) {
+    t.innerHTML = `<div class="empty"><h3>Upload a claim file to begin</h3>Drop a PDF on the left. A large file is read once; after that, questions take seconds.</div>`;
+    return;
+  }
+  if (!items.length) {
+    t.innerHTML = `<div class="empty"><h3>Ask anything about this file</h3>Every answer shows the pages it came from and the related CPT codes.
+      <div class="chips">${SUGGEST.map(s => `<button class="chip">${esc(s)}</button>`).join('')}</div></div>`;
+    t.querySelectorAll('.chip').forEach(b => b.onclick = () => ask(b.textContent));
+    return;
+  }
+  t.innerHTML = '';
+  items.forEach(el => t.appendChild(el));
+  t.scrollTop = t.scrollHeight;
+}
+
+/* upload + progress */
+$('pick').onclick = () => $('file').click();
+$('file').onchange = () => { if ($('file').files[0]) upload($('file').files[0]); $('file').value = ''; };
+const drop = $('drop');
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => { const f = ev.dataTransfer.files[0]; if (f) upload(f); });
+
+async function upload(f) {
+  const id = f.name.replace(/\.pdf$/i, '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) || 'case';
+  if (!/\.pdf$/i.test(f.name)) { jobs[id] = {stage:'error', error:'Only PDF files are accepted.'}; renderJobs(); return; }
+  jobs[id] = {stage: 'uploading', label: `Uploading ${(f.size / 1048576).toFixed(0)} MB`, done: 0, total: 0};
+  renderJobs(); loadCases();
+  const fd = new FormData(); fd.append('file', f); fd.append('case_id', id); fd.append('wait', 'false');
+  try { await api('/cases', {method: 'POST', body: fd}); poll(id); }
+  catch (e) { jobs[id] = {stage: 'error', error: e.message}; renderJobs(); }
+}
+
+async function poll(id) {
+  try {
+    const s = await api(`/cases/${encodeURIComponent(id)}/status`);
+    jobs[id] = s; renderJobs();
+    if (s.stage === 'ready') { setTimeout(() => { delete jobs[id]; renderJobs(); loadCases(id); }, 800); return; }
+    if (s.stage === 'error') return;
+  } catch (e) { jobs[id] = {stage:'error', error: e.message}; renderJobs(); return; }
+  setTimeout(() => poll(id), 1500);
+}
+
+function fmtTime(s) {
+  if (s == null) return '';
+  if (s < 60) return `${Math.max(1, Math.round(s))} s`;
+  const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+const STEP = {uploading: 1, queued: 1, reading: 1, ocr: 2, analyzing: 3, indexing: 4, ready: 4};
+function renderJobs() {
+  $('jobs').innerHTML = Object.entries(jobs).map(([id, j]) => {
+    if (j.stage === 'error') return `<div class="job error"><div class="name">${esc(id)}</div><div class="meta">${esc(j.error || 'Failed')}</div>
+      <button class="btn ghost dismiss" data-id="${esc(id)}" style="margin-top:8px">Dismiss</button></div>`;
+    const pct = j.total ? Math.round(100 * j.done / j.total) : null;
+    const unit = j.stage === 'indexing' ? 'passages' : 'pages';
+    const counts = j.total > 1 ? `${j.done.toLocaleString()} / ${j.total.toLocaleString()} ${unit}` : '';
+    const eta = j.stage_eta_s ? ` · about ${fmtTime(j.stage_eta_s)} left in this step` : '';
+    return `<div class="job"><div class="name">${esc(id)}</div>
+      <div>Step ${STEP[j.stage] || 1} of 4: ${esc(j.label || j.stage)}</div>
+      <div class="bar${pct == null ? ' indeterminate' : ''}"><i style="width:${pct ?? 30}%"></i></div>
+      <div class="meta">${counts}${eta}${j.elapsed_s ? ` · ${fmtTime(j.elapsed_s)} so far` : ''}</div></div>`;
+  }).join('');
+  document.querySelectorAll('.dismiss').forEach(b => b.onclick = () => { delete jobs[b.dataset.id]; renderJobs(); });
+}
+
+/* asking */
+$('askForm').onsubmit = ev => { ev.preventDefault(); ask($('question').value); };
+$('question').addEventListener('keydown', ev => { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ask($('question').value); } });
+$('question').addEventListener('input', () => { const q = $('question'); q.style.height = 'auto'; q.style.height = Math.min(q.scrollHeight, 140) + 'px'; });
+
+async function ask(q) {
+  q = (q || '').trim();
+  if (!q) return;
+  if (!state.current) { $('caseTitle').textContent = 'Upload or choose a case file first'; return; }
+  const caseId = state.current;
+  const list = state.threads[caseId] = state.threads[caseId] || [];
+  const el = document.createElement('div'); el.className = 'qa';
+  el.innerHTML = `<div class="q">${esc(q)}</div><div class="a"><div class="thinking"><span class="dots"><i></i><i></i><i></i></span>
+    Searching ${state.pageCount ? Number(state.pageCount).toLocaleString() + ' pages' : 'the file'} and writing the answer…</div></div>`;
+  list.push(el); renderThread();
+  $('question').value = ''; $('question').style.height = 'auto'; $('askBtn').disabled = true;
+  const t0 = performance.now();
+  try {
+    const d = await api(`/cases/${encodeURIComponent(caseId)}/ask`, {method:'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: q})});
+    el.querySelector('.a').innerHTML = answerHtml(d, (performance.now() - t0) / 1000);
+    el.querySelectorAll('.pg').forEach(b => b.onclick = () => openPage(caseId, +b.dataset.page, b.dataset.quote));
+  } catch (e) {
+    el.querySelector('.a').innerHTML = `<div class="warning">${esc(e.message)}</div>`;
+  }
+  $('askBtn').disabled = false;
+  if (state.current === caseId) $('thread').scrollTop = $('thread').scrollHeight;
+}
+
+function pageBtn(n, quote) { return `<button class="pg" data-page="${n}" data-quote="${esc(quote || '')}">p. ${n}</button>`; }
+
+function answerHtml(d, secs) {
+  const quoteFor = {}; d.sources.forEach(s => { if (!quoteFor[s.page]) quoteFor[s.page] = s.quote; });
+  const text = esc(d.answer)
+    .replace(/\(\s*p(?:age|g)?\.?\s*(\d{1,5})\s*\)/gi, (m, n) => pageBtn(n, quoteFor[n]))
+    .replace(/(^|[^>])\bp\.\s*(\d{1,5})\b/g, (m, pre, n) => pre + pageBtn(n, quoteFor[n]));
+  const cpt = d.cpt_codes.length ? `<h4>Related CPT / HCPCS codes</h4><div class="tablewrap"><table><thead><tr><th>Code</th><th>Type</th><th>Billed</th><th>Dates</th><th>Pages</th></tr></thead><tbody>` +
+    d.cpt_codes.map(c => `<tr><td class="code">${esc(c.code)}</td><td>${esc(c.category)}</td>
+      <td class="num">${c.billed_lines ? `${c.billed_lines} line${c.billed_lines > 1 ? 's' : ''} · ${c.units} unit${c.units > 1 ? 's' : ''}<br><b>${money(c.billed_total)}</b>` : '<span class="muted">mentioned only</span>'}</td>
+      <td class="num">${c.first_date ? esc(c.first_date) + (c.last_date && c.last_date !== c.first_date ? ' to ' + esc(c.last_date) : '') : '-'}</td>
+      <td>${c.pages.slice(0, 8).map(p => pageBtn(p)).join('')}${c.pages.length > 8 ? ` <span class="muted">+${c.pages.length - 8}</span>` : ''}</td></tr>`).join('') +
+    '</tbody></table></div>' : '';
+  const src = d.sources.length ? `<h4>Sources (quoted from the file)</h4>` +
+    d.sources.map(s => `<div class="src">${pageBtn(s.page, s.quote)}<div>“${esc(s.quote)}”</div></div>`).join('') : '';
+  const methods = {
+    model: ['ok', 'Verified against the file'], escalated: ['ok', 'Verified (second model)'],
+    extractive: ['warn', 'Matching passages (no model)'], unverified: ['warn', 'Not verified: showing passages'] };
+  const [cls, label] = methods[d.method] || ['warn', d.method];
+  const warns = d.warnings.map(w => `<div class="warning">${esc(w)}</div>`).join('');
+  return `<div class="text">${text}</div>${cpt}${src}${warns}
+    <div class="badges"><span class="badge ${cls}">${esc(label)}</span>
+      ${d.model ? `<span>${esc(d.model)}</span>` : ''}<span>${secs.toFixed(1)} s</span>
+      <span>searched pages ${esc(d.searched_pages.join(', '))}</span></div>`;
+}
+
+/* page viewer */
+async function openPage(caseId, n, quote) {
+  state.viewer = {caseId, n};
+  $('viewer').classList.add('open'); $('viewer').setAttribute('aria-hidden', 'false');
+  $('vTitle').textContent = `Page ${n}`; $('vText').textContent = 'Loading…';
+  try {
+    const p = await api(`/cases/${encodeURIComponent(caseId)}/pages/${n}`);
+    const extra = [p.page_type && p.page_type !== 'other' ? p.page_type.replace(/_/g, ' ') : '',
+                   p.text_source === 'tesseract' ? `scanned${p.ocr_confidence != null ? ', OCR ' + Math.round(p.ocr_confidence * 100) + '%' : ''}` : '',
+                   p.duplicate_of ? `duplicate of p. ${p.duplicate_of}` : ''].filter(Boolean).join(' · ');
+    $('vTitle').textContent = `Page ${n}${extra ? ' · ' + extra : ''}`;
+    $('vText').innerHTML = highlight(p.text || '(no text on this page)', quote);
+    const m = $('vText').querySelector('mark'); if (m) m.scrollIntoView({block: 'center'});
+  } catch (e) { $('vText').textContent = e.message; }
+}
+function highlight(text, quote) {
+  const safe = esc(text);
+  if (!quote) return safe;
+  const words = esc(quote).split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return safe;
+  try { return safe.replace(new RegExp(words.join('\\s+'), 'i'), m => `<mark>${m}</mark>`); } catch (e) { return safe; }
+}
+$('closeV').onclick = () => { $('viewer').classList.remove('open'); $('viewer').setAttribute('aria-hidden', 'true'); };
+$('prevPg').onclick = () => { const v = state.viewer; if (v && v.n > 1) openPage(v.caseId, v.n - 1); };
+$('nextPg').onclick = () => { const v = state.viewer; if (v && (!state.pageCount || v.n < state.pageCount)) openPage(v.caseId, v.n + 1); };
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape') $('closeV').click(); });
+
+$('key').value = savedKey();
+loadHealth(); loadCases(); renderThread();
 </script>
 </body>
 </html>

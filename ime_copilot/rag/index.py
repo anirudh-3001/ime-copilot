@@ -9,7 +9,8 @@
   BM25 by reciprocal rank fusion (hybrid search).
 - Duplicate pages (faxed copies) are indexed once.
 
-Built in memory per case: a 2,000-page file indexes in a few seconds.
+Keyword index: built in memory, a few seconds for 2,000 pages.
+Meaning vectors: computed once and saved on disk (rag/store.py), then reused.
 """
 
 from __future__ import annotations
@@ -20,6 +21,11 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
+
+try:                                   # optional: much faster vector search when installed
+    import numpy as _np
+except ImportError:                    # pragma: no cover
+    _np = None
 
 from ..schemas import Page
 
@@ -147,13 +153,18 @@ class CaseIndex:
 
     @classmethod
     def build(cls, pages: Sequence[Page], embedder: Embedder | None = None,
-              vector_cache: dict[str, list[float]] | None = None) -> "CaseIndex":
+              vector_cache: dict[str, list[float]] | None = None,
+              on_progress: Callable[[int, int], None] | None = None) -> "CaseIndex":
         passages = make_passages(pages)
         bm25 = BM25([tokenize(p.text) for p in passages])
         vectors = None
         if embedder is not None and passages:
-            vectors = _embed_with_cache(embedder, [p.text for p in passages], vector_cache)
-        return cls(passages, bm25, vectors, embedder, {p.page_no: p for p in pages})
+            vectors = _embed_with_cache(embedder, [p.text for p in passages], vector_cache,
+                                        on_progress=on_progress)
+            vectors = [_unit(v) for v in vectors]
+        idx = cls(passages, bm25, vectors, embedder, {p.page_no: p for p in pages})
+        idx._matrix = _np.asarray(vectors, dtype="float32") if (_np is not None and vectors) else None
+        return idx
 
     def search(self, question: str, k: int = 8) -> list[Hit]:
         if not self.passages:
@@ -164,8 +175,12 @@ class CaseIndex:
 
         vec_rank: dict[int, int] = {}
         if self.vectors is not None and self.embedder is not None:
-            q = self.embedder([question])[0]
-            sims = [_cos(q, v) for v in self.vectors]
+            q = _unit(self.embedder([question])[0])
+            matrix = getattr(self, "_matrix", None)
+            if matrix is not None:
+                sims = (matrix @ _np.asarray(q, dtype="float32")).tolist()
+            else:
+                sims = [sum(x * y for x, y in zip(q, v)) for v in self.vectors]
             vec_order = sorted(range(len(sims)), key=lambda i: -sims[i])
             vec_rank = {i: r for r, i in enumerate(vec_order[:200])}
 
@@ -178,6 +193,11 @@ class CaseIndex:
         return [Hit(self.passages[i], round(fused[i], 6), bm_rank.get(i), vec_rank.get(i)) for i in top]
 
 
+def _unit(v: list[float]) -> list[float]:
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / n for x in v]
+
+
 def _cos(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a)) or 1.0
@@ -186,12 +206,21 @@ def _cos(a: list[float], b: list[float]) -> float:
 
 
 def _embed_with_cache(embedder: Embedder, texts: list[str], cache: dict[str, list[float]] | None,
-                      batch: int = 64) -> list[list[float]]:
+                      batch: int = 64, on_progress: Callable[[int, int], None] | None = None
+                      ) -> list[list[float]]:
     cache = cache if cache is not None else {}
     keys = [hashlib.sha256(t.encode()).hexdigest()[:24] for t in texts]
     missing = [i for i, k in enumerate(keys) if k not in cache]
+    total, done = len(keys), len(keys) - len(missing)
+    if on_progress:
+        on_progress(done, total)
     for start in range(0, len(missing), batch):
         idx = missing[start:start + batch]
         for i, vec in zip(idx, embedder([texts[i] for i in idx])):
             cache[keys[i]] = vec
+        if hasattr(cache, "flush"):
+            cache.flush()                 # saved after every batch: an interrupted run resumes here
+        done += len(idx)
+        if on_progress:
+            on_progress(done, total)
     return [cache[k] for k in keys]

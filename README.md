@@ -13,7 +13,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env          # already set up for the local Mac models
-pytest -q                     # should say: 26 passed
+pytest -q                     # all tests should pass (1 skips until Tesseract is installed)
 python -m ime_copilot check   # checks Ollama answers + search model
 ```
 
@@ -25,11 +25,13 @@ python -m ime_copilot ask data/MY_FILE.pdf "What physical therapy was billed?"
 ```
 The first time, a PDF is read and OCR'd, which can take a while for 2,000 pages. After that, questions are quick.
 
-**Or use the web page:**
+**Or use the web page (best for demos):**
 ```bash
 python -m ime_copilot serve       # then open http://127.0.0.1:8000
 ```
-Upload a PDF, pick it, type a question. You get the answer, a CPT table (code, type, pages, billed lines, units, dates) and the quoted source pages.
+Drop a PDF on the left. A progress card shows each step (reading, OCR, analysis, search index) with time left. Then ask questions: every answer has clickable page numbers that open the page with the quote highlighted, a CPT table (code, type, billed lines, units, total, dates, pages) and a badge showing whether the answer was verified against the file.
+
+**Big files are processed once.** OCR results are cached in `data/ocr_cache` and search vectors in `data/index/<case>`. If processing stops (Mac sleeps, Ollama closes), running it again continues where it stopped. Restarting the server or `ask` afterwards loads the case in seconds.
 
 **Check accuracy on the test questions:**
 ```bash

@@ -67,32 +67,41 @@ class AzureOpenAIProvider:
 
 
 class LocalProvider:
-    """A model on this machine. For Ollama, uses its native /api/chat so we can set the
-    context window, turn off thinking and force JSON output."""
+    """A model running on this machine (Ollama, LM Studio, vLLM...).
+
+    Nothing leaves the machine. Default: Ollama at http://localhost:11434/v1.
+    For Ollama, answers use its native /api/chat endpoint so we can set the context
+    window (Ollama's default is small and silently cuts long prompts), turn off
+    "thinking" and force JSON output. Other servers use the OpenAI-style API.
+    """
 
     def __init__(self, base_url: str = "http://localhost:11434/v1", client=None, timeout: float = 600,
                  num_ctx: int = 16384):
-        self.timeout, self.num_ctx, self.native_url, self._think_ok = timeout, num_ctx, None, True
+        self.timeout, self.num_ctx = timeout, num_ctx
+        self.native_url = None
         if client is not None:
             self.client = client
             return
-        from openai import OpenAI
+        from openai import OpenAI  # pip install openai
         self.client = OpenAI(base_url=base_url, api_key="local", timeout=timeout, max_retries=0)
         if ":11434" in base_url:
             self.native_url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
+        self._think_ok = True
 
-    def complete(self, model_id, system, user, max_tokens):
+    def complete(self, model_id: str, system: str, user: str, max_tokens: int) -> tuple[str, int, int]:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         if self.native_url:
             return self._ollama_chat(model_id, messages, max(max_tokens, 1000))
         resp = self.client.chat.completions.create(
-            model=model_id, temperature=0, max_tokens=max(max_tokens, 1000), messages=messages)
-        u = resp.usage
-        return (resp.choices[0].message.content or ""), getattr(u, "prompt_tokens", 0) or 0, \
-            getattr(u, "completion_tokens", 0) or 0
+            model=model_id, temperature=0, max_tokens=max(max_tokens, 1000), messages=messages,
+        )
+        text = resp.choices[0].message.content or ""
+        usage = resp.usage
+        return text, getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0
 
-    def _ollama_chat(self, model_id, messages, max_tokens):
-        import urllib.error, urllib.request
+    def _ollama_chat(self, model_id: str, messages: list, max_tokens: int) -> tuple[str, int, int]:
+        import urllib.error
+        import urllib.request
         body = {"model": model_id, "messages": messages, "stream": False, "format": "json",
                 "options": {"temperature": 0, "num_ctx": self.num_ctx, "num_predict": max_tokens}}
         if self._think_ok:
@@ -104,7 +113,7 @@ class LocalProvider:
                 data = json.loads(r.read())
         except urllib.error.HTTPError as err:
             detail = err.read().decode(errors="replace")[:200]
-            if self._think_ok and "think" in detail.lower():
+            if self._think_ok and "think" in detail.lower():   # model without a thinking switch
                 self._think_ok = False
                 return self._ollama_chat(model_id, messages, max_tokens)
             raise RuntimeError(f"Ollama error {err.code}: {detail}") from err
@@ -113,7 +122,7 @@ class LocalProvider:
         text = (data.get("message") or {}).get("content") or ""
         return text, data.get("prompt_eval_count", 0) or 0, data.get("eval_count", 0) or 0
 
-    def embed(self, model_id, texts):
+    def embed(self, model_id: str, texts: list[str]) -> tuple[list[list[float]], int]:
         resp = self.client.embeddings.create(model=model_id, input=texts)
         return [d.embedding for d in resp.data], getattr(getattr(resp, "usage", None), "prompt_tokens", 0) or 0
 
@@ -321,5 +330,6 @@ def parse_json(text: str) -> Any:
         pass
     match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
     if not match:
-        raise ValueError(f"Model reply contained no JSON ({len(text)} characters returned).")
+        raise ValueError(f"Model reply contained no JSON ({len(text)} characters returned"
+                         f"{'; empty reply' if not text.strip() else ''}).")
     return json.loads(match.group(1))

@@ -65,10 +65,11 @@ class Settings:
     ocr: str = "auto"                  # auto | pdftext | tesseract | azure_di | textract
     extractor: str = "rules"           # rules | llm
     provider: str = "none"             # none | local | azure_openai | foundry_claude | bedrock
-    local_num_ctx: int = 16384
     local_base_url: str = "http://localhost:11434/v1"   # Ollama (or LM Studio, vLLM) on this machine
+    local_num_ctx: int = 16384         # Ollama context window (tokens); its default is too small for RAG
     storage: str = "local"             # local | azure_blob
     local_storage_dir: str = "data/blobs"
+    index_dir: str = "data/index"      # saved search vectors, one folder per case
     max_upload_mb: int = 500
     api_key: str = ""                  # shared secret for the dev API (Entra ID in production)
 
@@ -124,6 +125,7 @@ class Settings:
             local_num_ctx=int(_env("IME_LOCAL_NUM_CTX", str(cls.local_num_ctx))),
             storage=_env("IME_STORAGE", cls.storage),
             local_storage_dir=_env("IME_LOCAL_STORAGE_DIR", cls.local_storage_dir),
+            index_dir=_env("IME_INDEX_DIR", cls.index_dir),
             max_upload_mb=int(_env("IME_MAX_UPLOAD_MB", str(cls.max_upload_mb))),
             api_key=_env("IME_API_KEY"),
             ocr_dpi=int(_env("IME_OCR_DPI", str(cls.ocr_dpi))),
