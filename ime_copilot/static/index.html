@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IME Copilot</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --text:#1f1f1d; --muted:#6b6a65; --line:#e3e1da; --accent:#1d5fa8; --warn:#8a5a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1b1b1a; --card:#252523; --text:#ecebe6; --muted:#a3a29c; --line:#3a3936; --accent:#7fb2ea; --warn:#e5b25c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.6 -apple-system, system-ui, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
+  label { color: var(--muted); font-size: 13px; }
+  input[type=text], input[type=password], select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+  textarea { min-height: 64px; resize: vertical; }
+  button { padding: 8px 16px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .row { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
+  .row > div { flex: 1; min-width: 200px; }
+  .status { color: var(--muted); font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+  .answer { white-space: pre-wrap; margin: 0 0 12px; }
+  table { width:100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; }
+  .q { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  .warn { color: var(--warn); font-size: 13px; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>IME Copilot</h1>
+  <p class="sub">Ask questions about a claim file. Answers come with related CPT codes and the page numbers they come from.</p>
+
+  <section>
+    <h2>1. Upload a PDF</h2>
+    <div class="row">
+      <div><input type="file" id="file" accept="application/pdf"></div>
+      <div style="flex:0"><button id="upload">Upload and read</button></div>
+    </div>
+    <div class="status" id="upStatus">Large files take a while the first time (OCR of scanned pages).</div>
+  </section>
+
+  <section>
+    <h2>2. Ask a question</h2>
+    <div class="row">
+      <div><label for="case">Case</label><select id="case"></select></div>
+      <div><label for="key">API key (only if set in .env)</label><input type="password" id="key"></div>
+    </div>
+    <div style="margin-top:10px"><label for="question">Question</label>
+      <textarea id="question" placeholder="e.g. How many lumbar epidural injections were billed and on which dates?"></textarea></div>
+    <div style="margin-top:10px"><button id="ask">Ask</button></div>
+    <div class="status" id="askStatus"></div>
+  </section>
+
+  <div id="results"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const headers = () => { const k = $('key').value.trim(); return k ? {'X-API-Key': k} : {}; };
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function loadCases(select) {
+  const r = await fetch('/cases', {headers: headers()});
+  if (!r.ok) { $('askStatus').textContent = r.status === 401 ? 'Enter the API key from .env.' : 'Could not load cases.'; return; }
+  const cases = await r.json();
+  $('case').innerHTML = cases.map(c => `<option value="${esc(c.case_id)}">${esc(c.case_id)} (${c.page_count} pages)</option>`).join('')
+    || '<option value="">No cases yet: upload a PDF</option>';
+  if (select) $('case').value = select;
+}
+
+$('upload').onclick = async () => {
+  const f = $('file').files[0];
+  if (!f) { $('upStatus').textContent = 'Choose a PDF first.'; return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  fd.append('case_id', f.name.replace(/\.pdf$/i, '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64));
+  $('upload').disabled = true;
+  $('upStatus').textContent = 'Reading the PDF... (watch the terminal for OCR progress)';
+  try {
+    const r = await fetch('/cases', {method: 'POST', body: fd, headers: headers()});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    $('upStatus').textContent = `Done: ${d.pages} pages, ${d.service_lines} billed service lines, ${d.needs_review.length} pages need review.`;
+    await loadCases(d.case_id);
+  } catch (e) { $('upStatus').textContent = 'Upload failed: ' + e.message; }
+  $('upload').disabled = false;
+};
+
+$('ask').onclick = async () => {
+  const caseId = $('case').value, q = $('question').value.trim();
+  if (!caseId) { $('askStatus').textContent = 'Upload or pick a case first.'; return; }
+  if (!q) { $('askStatus').textContent = 'Type a question first.'; return; }
+  $('ask').disabled = true;
+  $('askStatus').textContent = 'Searching the document and writing the answer...';
+  try {
+    const r = await fetch(`/cases/${encodeURIComponent(caseId)}/ask`, {method: 'POST',
+      headers: {...headers(), 'Content-Type': 'application/json'}, body: JSON.stringify({question: q})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    render(d);
+    $('askStatus').textContent = '';
+  } catch (e) { $('askStatus').textContent = 'Failed: ' + e.message; }
+  $('ask').disabled = false;
+};
+
+function render(d) {
+  const cpt = d.cpt_codes.length ? `<h2>CPT / HCPCS codes</h2><table><tr><th>Code</th><th>Type</th><th>Pages</th><th>Billed</th></tr>` +
+    d.cpt_codes.map(c => `<tr><td>${esc(c.code)}</td><td>${esc(c.category)}</td><td>${esc(c.pages.join(', '))}</td>
+      <td>${c.billed_lines ? `${c.billed_lines} line(s), ${c.units} unit(s), $${c.billed_total.toLocaleString(undefined,{minimumFractionDigits:2})}<br><span class="meta">${esc(c.first_date)} to ${esc(c.last_date)}</span>` : '-'}</td></tr>`).join('') + '</table>' : '';
+  const src = d.sources.length ? `<h2 style="margin-top:14px">Sources</h2><table><tr><th>Page</th><th>Quote</th></tr>` +
+    d.sources.map(s => `<tr><td>${s.page}</td><td>&ldquo;${esc(s.quote)}&rdquo;</td></tr>`).join('') + '</table>' : '';
+  const warn = d.warnings.map(w => `<div class="warn">${esc(w)}</div>`).join('');
+  const card = document.createElement('section');
+  card.innerHTML = `<div class="q">${esc(d.question)}</div><p class="answer">${esc(d.answer)}</p>${cpt}${src}${warn}
+    <div class="meta">${esc(d.method)}${d.model ? ' &middot; ' + esc(d.model) : ''} &middot; pages searched: ${esc(d.searched_pages.join(', '))}</div>`;
+  $('results').prepend(card);
+}
+loadCases();
+</script>
+</body>
+</html>
