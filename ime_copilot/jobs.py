@@ -1,7 +1,8 @@
 """Background processing for the web page: read a big PDF, then build its search index,
 reporting progress so the page can show a progress bar and time left.
 
-Stages: queued -> reading -> ocr -> analyzing -> indexing -> ready  (or error)
+Stages: queued -> reading -> ocr -> analyzing -> indexing -> summarizing -> ready  (or error)
+Questions can be asked from 'summarizing' on; the written summary appears when it is done.
 One process, in-memory job table: right for a single Mac demo. In Azure this becomes
 a queue (Service Bus) and a worker, with the same stages.
 """
@@ -20,6 +21,7 @@ STAGE_LABELS = {
     "ocr": "Reading scanned pages (OCR)",
     "analyzing": "Finding bills, diagnoses and duplicate pages",
     "indexing": "Building the search index",
+    "summarizing": "Writing the case summary (questions already work)",
     "ready": "Ready for questions",
     "error": "Failed",
 }
@@ -35,8 +37,14 @@ def get_job(case_id: str) -> dict | None:
 
 
 def is_running(case_id: str) -> bool:
+    """True while the file can't be searched yet (questions are allowed during 'summarizing')."""
     job = get_job(case_id)
-    return bool(job) and job["stage"] not in ("ready", "error")
+    return bool(job) and job["stage"] not in ("ready", "error", "summarizing")
+
+
+def is_summarizing(case_id: str) -> bool:
+    job = get_job(case_id)
+    return bool(job) and job["stage"] == "summarizing"
 
 
 def _update(case_id: str, stage: str, done: int = 0, total: int = 0, **extra) -> None:
@@ -73,6 +81,37 @@ def _run(pdf_path: Path, case_id: str, settings: Settings, storage, page_range) 
         engine = get_engine(settings.db_url)
         qa = get_qa(engine, case_id, settings, refresh=True,
                     on_progress=lambda d, t: _update(case_id, "indexing", d, t))
+        _summarize(qa, case_id, settings)
         _update(case_id, "ready", 1, 1, notes=qa.notes)
     except Exception as err:  # noqa: BLE001 - shown on the page; the server keeps running
         _update(case_id, "error", error=f"{type(err).__name__}: {err}")
+
+
+def _summarize(qa, case_id: str, settings: Settings) -> None:
+    """Write the report-style summary, if an answer model is set (otherwise only the facts show)."""
+    from .case_summary import write_overview
+    if qa.gateway is None or not qa.gateway.has_model("answer"):
+        return
+    try:
+        write_overview(qa, settings.index_dir, case_id,
+                       on_progress=lambda d, t: _update(case_id, "summarizing", d, t))
+    except Exception as err:  # noqa: BLE001 - questions still work without the summary
+        _update(case_id, "summarizing", 0, 0, summary_error=f"{type(err).__name__}: {err}")
+
+
+def start_summary(case_id: str, settings: Settings) -> None:
+    """Rewrite the summary for an already processed file (the 'Rewrite summary' button)."""
+    from .case_summary import OVERVIEW_QUESTIONS
+    _update(case_id, "summarizing", 0, len(OVERVIEW_QUESTIONS))
+
+    def run():
+        from .db import get_engine
+        from .rag.service import get_qa
+        try:
+            qa = get_qa(get_engine(settings.db_url), case_id, settings)
+            _summarize(qa, case_id, settings)
+            _update(case_id, "ready", 1, 1)
+        except Exception as err:  # noqa: BLE001
+            _update(case_id, "error", error=f"{type(err).__name__}: {err}")
+
+    threading.Thread(target=run, name=f"ime-summary-{case_id}", daemon=True).start()

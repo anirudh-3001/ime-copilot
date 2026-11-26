@@ -6,5 +6,5 @@ __pycache__/
 .env
 data/
 # Never commit patient files
-*.pdf
-!tests/fixtures/*.pdf
+*.[Pp][Dd][Ff]
+!tests/fixtures/*.[Pp][Dd][Ff]

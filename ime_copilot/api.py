@@ -134,6 +134,33 @@ def status(case_id: str) -> dict:
             "pages": case.get("page_count")}
 
 
+@app.get("/cases/{case_id}/summary", dependencies=[Depends(require_key)])
+def case_summary(case_id: str) -> dict:
+    """The pinned summary: facts from the file (always) + the written summary (once it's done)."""
+    from .case_summary import build_summary, load_overview
+    _case_or_404(case_id)
+    facts = build_summary(_engine(), case_id)
+    overview = load_overview(settings().index_dir, case_id)
+    job = jobs.get_job(case_id) or {}
+    status = ("writing" if jobs.is_summarizing(case_id) else "done" if overview
+              else "unavailable" if settings().provider == "none" else "not_started")
+    return {"facts": facts, "overview": overview, "overview_status": status,
+            "overview_progress": {"done": job.get("done", 0), "total": job.get("total", 0)}
+            if status == "writing" else None}
+
+
+@app.post("/cases/{case_id}/summary", dependencies=[Depends(require_key)])
+def rewrite_summary(case_id: str) -> dict:
+    """Write (or rewrite) the report-style summary in the background."""
+    _case_or_404(case_id)
+    if settings().provider == "none":
+        raise HTTPException(status_code=400, detail="No answer model is set, so a written summary isn't available.")
+    if jobs.is_running(case_id) or jobs.is_summarizing(case_id):
+        raise HTTPException(status_code=409, detail="This file is busy; try again in a moment.")
+    jobs.start_summary(case_id, settings())
+    return {"case_id": case_id, "status": "writing"}
+
+
 @app.get("/cases/{case_id}", dependencies=[Depends(require_key)])
 def case(case_id: str) -> dict:
     return _case_or_404(case_id)

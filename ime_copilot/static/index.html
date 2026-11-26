@@ -67,7 +67,7 @@
   .a { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow); }
   .a .text { white-space:pre-wrap; }
   .pg { display:inline-block; padding:0 6px; margin:0 1px; border-radius:6px; background:var(--accent-soft); color:var(--accent);
-    font-size:12.5px; font-weight:600; border:0; line-height:1.6; vertical-align:baseline; }
+    font-size:12.5px; font-weight:600; border:0; line-height:1.6; vertical-align:baseline; white-space:nowrap; }
   .pg:hover { outline:1px solid var(--accent); }
   .a h4 { margin:16px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
   .tablewrap { overflow-x:auto; }
@@ -108,6 +108,36 @@
     .thread, .composer, .top { padding-left:16px; padding-right:16px; }
     main { min-height:70vh; }
   }
+
+  /* pinned case summary */
+  .summary { border-bottom:1px solid var(--line); background:var(--panel); }
+  .sumbar { display:flex; align-items:center; gap:10px; padding:10px 28px; flex-wrap:wrap; }
+  .sumbar .pin { font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; }
+  .facts { display:flex; gap:6px; flex-wrap:wrap; flex:1; min-width:0; }
+  .fact { background:var(--sunk); border-radius:8px; padding:2px 9px; font-size:13px; white-space:nowrap; }
+  .fact span { color:var(--muted); margin-right:4px; }
+  .sumbody { display:none; padding:0 28px 14px; max-height:58vh; overflow:auto; }
+  .summary.open .sumbody { display:block; }
+  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:12px; position:sticky; top:0; background:var(--panel); z-index:1; }
+  .tab { background:none; border:0; border-bottom:2px solid transparent; padding:8px 12px; color:var(--muted); font-weight:600; font-size:13.5px; }
+  .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+  .sec { padding:10px 0; border-bottom:1px solid var(--line); }
+  .sec:last-child { border-bottom:0; }
+  .sec h5 { margin:0 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .sec .body { white-space:pre-wrap; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px 24px; }
+  .kv { display:grid; grid-template-columns:120px 1fr; gap:4px 10px; font-size:13.5px; }
+  .kv dt { color:var(--muted); } .kv dd { margin:0; }
+  .writing { color:var(--muted); font-size:13.5px; display:flex; gap:8px; align-items:center; padding:6px 0; }
+  .small { font-size:12.5px; }
+  @media (max-width: 760px) { .sumbar, .sumbody { padding-left:16px; padding-right:16px; } }
+  @media print {
+    aside, .composer, .thread, .viewer, .sumbar button, .tabs { display:none !important; }
+    .app { display:block; height:auto; } main { display:block; }
+    .summary .sumbody { display:block !important; max-height:none; overflow:visible; }
+    .tabpane { display:block !important; margin-bottom:18px; }
+    body { background:#fff; color:#000; }
+  }
 </style>
 </head>
 <body>
@@ -132,6 +162,15 @@
 
   <main>
     <div class="top"><h2 id="caseTitle">No case selected</h2><span class="muted" id="caseMeta"></span></div>
+    <div class="summary" id="summary" hidden>
+      <div class="sumbar">
+        <span class="pin">📌 Case summary</span>
+        <div class="facts" id="facts"></div>
+        <button class="btn ghost" id="sumToggle" aria-expanded="false">Show</button>
+        <button class="btn ghost" id="sumPrint" title="Print or save as PDF">Print</button>
+      </div>
+      <div class="sumbody" id="sumBody"></div>
+    </div>
     <div class="thread" id="thread"></div>
     <div class="composer">
       <form id="askForm">
@@ -158,6 +197,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const money = n => '$' + Number(n || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
 const state = { cases: [], current: null, pageCount: 0, viewer: null, threads: {} };
 const jobs = {};
+const opened = new Set();
 const SUGGEST = [
   'What physical therapy was billed?',
   'How many lumbar epidural injections were billed and on which dates?',
@@ -195,7 +235,7 @@ async function loadHealth() {
 async function loadCases(select) {
   try { state.cases = await api('/cases'); }
   catch (e) { $('cases').innerHTML = `<div class="muted" style="padding:8px 10px">${esc(e.message)}</div>`; return; }
-  const running = new Set(Object.keys(jobs).filter(id => jobs[id].stage !== 'error'));
+  const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing'].includes(jobs[id].stage)));
   const shown = state.cases.filter(c => !running.has(c.case_id));
   $('cases').innerHTML = shown.map(c =>
     `<button class="case${c.case_id === state.current ? ' active' : ''}" data-id="${esc(c.case_id)}">
@@ -213,6 +253,8 @@ function selectCase(id) {
   $('caseMeta').textContent = c ? `${Number(c.page_count).toLocaleString()} pages` : '';
   document.querySelectorAll('.case').forEach(b => b.classList.toggle('active', b.dataset.id === id));
   renderThread();
+  $('summary').hidden = true; sumTab = 'summary';
+  loadSummary(id);
   $('question').focus();
 }
 
@@ -256,7 +298,16 @@ async function poll(id) {
   try {
     const s = await api(`/cases/${encodeURIComponent(id)}/status`);
     jobs[id] = s; renderJobs();
-    if (s.stage === 'ready') { setTimeout(() => { delete jobs[id]; renderJobs(); loadCases(id); }, 800); return; }
+    if (s.stage === 'summarizing' && !opened.has(id)) {     // questions work now; the summary fills in
+      opened.add(id); loadCases(id);
+    }
+    if (s.stage === 'ready') {
+      setTimeout(() => {
+        delete jobs[id]; renderJobs();
+        if (opened.has(id)) { loadCases(); if (state.current === id) loadSummary(id); } else { opened.add(id); loadCases(id); }
+      }, 800);
+      return;
+    }
     if (s.stage === 'error') return;
   } catch (e) { jobs[id] = {stage:'error', error: e.message}; renderJobs(); return; }
   setTimeout(() => poll(id), 1500);
@@ -267,17 +318,17 @@ function fmtTime(s) {
   if (s < 60) return `${Math.max(1, Math.round(s))} s`;
   const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
-const STEP = {uploading: 1, queued: 1, reading: 1, ocr: 2, analyzing: 3, indexing: 4, ready: 4};
+const STEP = {uploading: 1, queued: 1, reading: 1, ocr: 2, analyzing: 3, indexing: 4, summarizing: 5, ready: 5};
 function renderJobs() {
   $('jobs').innerHTML = Object.entries(jobs).map(([id, j]) => {
     if (j.stage === 'error') return `<div class="job error"><div class="name">${esc(id)}</div><div class="meta">${esc(j.error || 'Failed')}</div>
       <button class="btn ghost dismiss" data-id="${esc(id)}" style="margin-top:8px">Dismiss</button></div>`;
     const pct = j.total ? Math.round(100 * j.done / j.total) : null;
-    const unit = j.stage === 'indexing' ? 'passages' : 'pages';
+    const unit = j.stage === 'indexing' ? 'passages' : j.stage === 'summarizing' ? 'sections' : 'pages';
     const counts = j.total > 1 ? `${j.done.toLocaleString()} / ${j.total.toLocaleString()} ${unit}` : '';
     const eta = j.stage_eta_s ? ` · about ${fmtTime(j.stage_eta_s)} left in this step` : '';
     return `<div class="job"><div class="name">${esc(id)}</div>
-      <div>Step ${STEP[j.stage] || 1} of 4: ${esc(j.label || j.stage)}</div>
+      <div>Step ${STEP[j.stage] || 1} of 5: ${esc(j.label || j.stage)}</div>
       <div class="bar${pct == null ? ' indeterminate' : ''}"><i style="width:${pct ?? 30}%"></i></div>
       <div class="meta">${counts}${eta}${j.elapsed_s ? ` · ${fmtTime(j.elapsed_s)} so far` : ''}</div></div>`;
   }).join('');
@@ -365,6 +416,123 @@ $('closeV').onclick = () => { $('viewer').classList.remove('open'); $('viewer').
 $('prevPg').onclick = () => { const v = state.viewer; if (v && v.n > 1) openPage(v.caseId, v.n - 1); };
 $('nextPg').onclick = () => { const v = state.viewer; if (v && (!state.pageCount || v.n < state.pageCount)) openPage(v.caseId, v.n + 1); };
 document.addEventListener('keydown', ev => { if (ev.key === 'Escape') $('closeV').click(); });
+
+
+/* ---------------- pinned case summary */
+let sumTab = 'summary', sumTimer = null;
+function sumOpen() { try { return localStorage.getItem('imeSumOpen') !== '0'; } catch (e) { return true; } }
+$('sumToggle').onclick = () => {
+  const open = !$('summary').classList.contains('open');
+  try { localStorage.setItem('imeSumOpen', open ? '1' : '0'); } catch (e) {}
+  setSumOpen(open);
+};
+function setSumOpen(open) {
+  $('summary').classList.toggle('open', open);
+  $('sumToggle').textContent = open ? 'Hide' : 'Show';
+  $('sumToggle').setAttribute('aria-expanded', String(open));
+}
+$('sumPrint').onclick = () => { setSumOpen(true); window.print(); };
+
+async function loadSummary(caseId) {
+  clearTimeout(sumTimer);
+  let d;
+  try { d = await api(`/cases/${encodeURIComponent(caseId)}/summary`); }
+  catch (e) { $('summary').hidden = true; return; }
+  if (state.current !== caseId) return;
+  $('summary').hidden = false;
+  renderSummary(d, caseId);
+  setSumOpen($('summary').classList.contains('open') || sumOpen());
+  if (d.overview_status === 'writing') sumTimer = setTimeout(() => loadSummary(caseId), 3000);
+}
+
+function renderSummary(d, caseId) {
+  const f = d.facts, det = {}; f.details.forEach(x => det[x.field] = x);
+  const chip = (label, x) => x ? `<span class="fact"><span>${esc(label)}</span>${esc(x.value)}</span>` : '';
+  $('facts').innerHTML = chip('Patient', det.patient_name) + chip('DOI', det.date_of_injury) + chip('Claim', det.claim_number) +
+    `<span class="fact"><span>Pages</span>${f.file.pages.toLocaleString()}</span>` +
+    (f.billing.lines ? `<span class="fact"><span>Billed</span>${money(f.billing.total)}</span>` : '');
+
+  const tabs = [['summary', 'Summary'], ['billing', `Billing (${f.billing.by_code.length} codes)`], ['file', 'Case & file']];
+  const pane = id => `class="tabpane" data-pane="${id}" ${sumTab === id ? '' : 'hidden'}`;
+  $('sumBody').innerHTML = `<div class="tabs" role="tablist">${tabs.map(([id, label]) =>
+      `<button class="tab${sumTab === id ? ' active' : ''}" data-tab="${id}" role="tab">${esc(label)}</button>`).join('')}</div>
+    <div ${pane('summary')}>${overviewHtml(d)}</div>
+    <div ${pane('billing')}>${billingHtml(f)}</div>
+    <div ${pane('file')}>${fileHtml(f)}</div>`;
+  $('sumBody').querySelectorAll('.tab').forEach(b => b.onclick = () => {
+    sumTab = b.dataset.tab;
+    $('sumBody').querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
+    $('sumBody').querySelectorAll('.tabpane').forEach(x => x.hidden = x.dataset.pane !== sumTab);
+  });
+  $('sumBody').querySelectorAll('.pg').forEach(b => b.onclick = () => openPage(caseId, +b.dataset.page, b.dataset.quote));
+  const rw = $('rewrite'); if (rw) rw.onclick = async () => {
+    rw.disabled = true;
+    try { await api(`/cases/${encodeURIComponent(caseId)}/summary`, {method: 'POST'}); } catch (e) { alert(e.message); }
+    loadSummary(caseId);
+  };
+}
+
+function withPages(text, sources) {
+  const quoteFor = {}; (sources || []).forEach(s => { if (!quoteFor[s.page]) quoteFor[s.page] = s.quote; });
+  return esc(text).replace(/\(\s*p(?:age|g)?\.?\s*(\d{1,5})\s*\)/gi, (m, n) => pageBtn(n, quoteFor[n]))
+                  .replace(/(^|[^>])\bp\.\s*(\d{1,5})\b/g, (m, pre, n) => pre + pageBtn(n, quoteFor[n]));
+}
+
+function overviewHtml(d) {
+  if (d.overview_status === 'unavailable')
+    return `<div class="muted">A written summary needs an answer model (IME_PROVIDER=local in .env). The billing and case tabs work without one.</div>`;
+  if (d.overview_status === 'writing') {
+    const p = d.overview_progress || {};
+    return `<div class="writing"><span class="dots"><i></i><i></i><i></i></span>Writing the summary${p.total ? ` (section ${Math.min(p.done + 1, p.total)} of ${p.total})` : ''}… You can already ask questions below.</div>`;
+  }
+  if (!d.overview) return `<div class="muted">No written summary yet. <button class="btn" id="rewrite" style="margin-left:8px">Write summary</button></div>`;
+  const NF = 'The retrieved pages of this document do not answer this question.';
+  const secs = d.overview.sections.map(s => {
+    const notFound = !s.answer || s.answer.startsWith(NF.slice(0, 40));
+    const shaky = s.method === 'unverified' || s.method === 'extractive';
+    const body = notFound ? '<span class="muted">Not found in the file.</span>'
+      : shaky ? `<span class="muted small">Could not write a verified summary for this section; closest passages:</span>\n${withPages(s.answer, s.sources)}`
+      : withPages(s.answer, s.sources);
+    return `<div class="sec"><h5>${esc(s.title)}</h5><div class="body">${body}</div></div>`;
+  }).join('');
+  return secs + `<div class="badges"><span class="badge ok">Every sentence checked against the cited pages</span>
+    ${d.overview.model ? `<span>${esc(d.overview.model)}</span>` : ''}
+    <button class="btn ghost" id="rewrite">Rewrite summary</button></div>`;
+}
+
+function billingHtml(f) {
+  const b = f.billing;
+  if (!b.lines) return '<div class="muted">No billed service lines were found in this file.</div>';
+  const cats = b.by_category.map(c => `<tr><td>${esc(c.category)}</td><td class="num">${c.lines}</td><td class="num">${money(c.total)}</td></tr>`).join('');
+  const codes = b.by_code.map(c => `<tr><td class="code">${esc(c.code)}</td><td>${esc(c.category)}</td><td class="num">${c.lines}</td>
+      <td class="num">${c.units}</td><td class="num">${money(c.total)}</td>
+      <td class="num">${c.first_date ? esc(c.first_date) + (c.last_date !== c.first_date ? ' to ' + esc(c.last_date) : '') : '-'}</td>
+      <td>${c.pages.slice(0, 6).map(p => pageBtn(p)).join('')}${c.pages.length > 6 ? ` <span class="muted">+${c.pages.length - 6}</span>` : ''}</td></tr>`).join('');
+  const prov = b.providers.length ? `<h4>Top billing providers</h4><div class="tablewrap"><table><tbody>${b.providers.map(p =>
+      `<tr><td>${esc(p.name)}</td><td class="num">${money(p.total)}</td></tr>`).join('')}</tbody></table></div>` : '';
+  return `<div class="kv" style="margin-bottom:12px"><dt>Total billed</dt><dd><b>${money(b.total)}</b> on ${b.lines} lines</dd>
+      <dt>Dates of service</dt><dd>${esc(b.first_date || '-')} to ${esc(b.last_date || '-')}</dd></div>
+    <h4>By type</h4><div class="tablewrap"><table><thead><tr><th>Type</th><th>Lines</th><th>Billed</th></tr></thead><tbody>${cats}</tbody></table></div>
+    <h4>By CPT / HCPCS code</h4><div class="tablewrap"><table><thead><tr><th>Code</th><th>Type</th><th>Lines</th><th>Units</th><th>Billed</th><th>Dates</th><th>Pages</th></tr></thead><tbody>${codes}</tbody></table></div>
+    ${prov}<p class="muted small">Totals are from billed lines the system could read and verify; check pages flagged for review.</p>`;
+}
+
+function fileHtml(f) {
+  const details = f.details.length ? f.details.map(x => `<dt>${esc(x.label)}</dt><dd>${esc(x.value)} ${x.page ? pageBtn(x.page) : ''}
+      ${x.other_values.length ? `<div class="muted small">Also seen: ${esc(x.other_values.join(', '))}</div>` : ''}</dd>`).join('')
+    : '<dd class="muted">Not found</dd>';
+  const types = f.file.page_types.map(t => `${esc(t.type.replace(/_/g, ' '))}: ${t.count}`).join(' · ');
+  const dx = f.diagnoses.length ? `<h4>Diagnosis codes (ICD-10)</h4>` + f.diagnoses.map(d =>
+      `<div class="src">${pageBtn(d.page)}<div><b>${esc(d.code)}</b> ${esc(d.description || '')}${d.first_seen_date ? ` <span class="muted">· first seen ${esc(d.first_seen_date)}</span>` : ''}</div></div>`).join('') : '';
+  const qs = f.questions.length ? `<h4>Questions from the IME referral</h4>` + f.questions.map(q =>
+      `<div class="src">${pageBtn(q.page)}<div><b>${esc(q.number)}.</b> ${esc(q.text)}</div></div>`).join('') : '';
+  const review = f.file.needs_review.length ? `<div class="warning">${f.file.needs_review.length} page(s) were hard to read and may be missing text:
+      ${f.file.needs_review.slice(0, 30).map(p => pageBtn(p)).join('')}${f.file.needs_review.length > 30 ? ' …' : ''}</div>` : '';
+  return `<div class="grid2"><div><h4 style="margin-top:0">Case details</h4><dl class="kv">${details}</dl></div>
+    <div><h4 style="margin-top:0">The file</h4><dl class="kv"><dt>Pages</dt><dd>${f.file.pages.toLocaleString()} (${f.file.duplicates} duplicates)</dd>
+      <dt>Scanned (OCR)</dt><dd>${f.file.scanned.toLocaleString()}</dd><dt>Page types</dt><dd>${types}</dd></dl></div></div>
+    ${review}${qs}${dx}`;
+}
 
 $('key').value = savedKey();
 loadHealth(); loadCases(); renderThread();

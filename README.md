@@ -31,6 +31,13 @@ python -m ime_copilot serve       # then open http://127.0.0.1:8000
 ```
 Drop a PDF on the left. A progress card shows each step (reading, OCR, analysis, search index) with time left. Then ask questions: every answer has clickable page numbers that open the page with the quote highlighted, a CPT table (code, type, billed lines, units, total, dates, pages) and a badge showing whether the answer was verified against the file.
 
+**Pinned case summary.** Every file gets a summary pinned at the top of its page, with three tabs:
+- *Summary*: written like an IME report (history of present illness, current symptoms, treatment, diagnostic studies, diagnoses, past history, function, work). Written automatically after upload; every sentence links to its page and is checked against it.
+- *Billing*: totals by type and by CPT code (lines, units, amounts, dates, pages) and the top billing providers.
+- *Case & file*: patient, DOB, claim number, date of injury, employer, insurer, the IME referral questions, diagnosis codes, and pages that were hard to read.
+
+*Print* saves it as a PDF. Files processed before this version show a *Write summary* button.
+
 **Big files are processed once.** OCR results are cached in `data/ocr_cache` and search vectors in `data/index/<case>`. If processing stops (Mac sleeps, Ollama closes), running it again continues where it stopped. Restarting the server or `ask` afterwards loads the case in seconds.
 
 **Check accuracy on the test questions:**
