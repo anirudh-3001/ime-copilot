@@ -171,7 +171,7 @@ def gather_passages(qa, queries=COVERAGE_QUERIES, per_query: int = 5, limit: int
 def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = "",
                    on_progress=None, case_context: str = "") -> dict:
     """Ask the model to write its own understanding of the case, then link it to pages and save it."""
-    from .rag.qa import _resolve_passage_markers, _unsupported_values
+    from .rag.qa import _resolve_passage_markers, _unsupported_values, fix_time_spans
     if on_progress:
         on_progress(0, 1)
     hits = gather_passages(qa)
@@ -193,6 +193,8 @@ def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = 
         out["warnings"].append(f"The model could not write the summary: {err}")
     if raw:
         text, sources, bad = _resolve_passage_markers(raw, hits, qa.pages_by_no, qa.facts)
+        text, span_notes = fix_time_spans(text)
+        out["warnings"] += span_notes
         out["text"] = text
         seen, uniq = set(), []
         for x in sources:
@@ -205,7 +207,8 @@ def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = 
         if not sources:
             out["method"] = "unlinked"
             out["warnings"].append("The model didn't mark its sources, so this summary isn't linked to pages.")
-        missing = _unsupported_values(text, " ".join(h.passage.text for h in hits) + " "
+        page_text = " ".join(qa.pages_by_no[x.page].text for x in sources if x.page in qa.pages_by_no)
+        missing = _unsupported_values(text, page_text + " " + " ".join(h.passage.text for h in hits) + " "
                                       + " ".join(f["text"] for f in qa.facts))
         if missing:
             out["warnings"].append("Check these in the file; they weren't found in the text the model read: "

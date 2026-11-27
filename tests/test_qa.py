@@ -212,3 +212,45 @@ def test_bad_search_plan_falls_back_to_the_question(processed):
     gw = Gateway(_settings(answer="gemma4:26b-a4b"), provider=FakeProvider(model))
     r = CaseQA(*processed, gateway=gw, use_embeddings=False).ask("What did the MRI show?")
     assert r.method == "model" and 3 in r.searched_pages
+
+
+def test_wrong_time_span_is_corrected():
+    from ime_copilot.rag.qa import fix_time_spans
+    text, notes = fix_time_spans("The patient has been under treatment for approximately 1 year and 6 months, "
+                                 "from February 21, 2024 until August 3, 2026 (p. 1). Next line stays.")
+    assert "about 2 years and 5 months" in text and "1 year and 6 months" not in text
+    assert notes and "02/21/2024 to 08/03/2026" in notes[0]
+    assert text.endswith("Next line stays.")
+    ok, none = fix_time_spans("Therapy ran from 03/18/2025 to 05/22/2025, about 2 months.")
+    assert none == [] and ok == "Therapy ran from 03/18/2025 to 05/22/2025, about 2 months."
+    plain, _ = fix_time_spans("Six visits over 3 months were billed.")          # one date or none: untouched
+    assert plain == "Six visits over 3 months were billed."
+
+
+def test_quote_prefers_the_line_with_the_sentence_date_and_is_short():
+    from ime_copilot.rag.qa import quote_for
+    passage = ("Credentials Lab Valid Date Range 09/11/14 1321 Present Study Signed Electronically signed on 11/9/22 "
+               "at 0343 Medications None Counts by Panel Panel 1 Type Reason Correct " * 3 +
+               "\nPatient was seen on 02/21/2024 for initial examination after the motor vehicle accident.\n"
+               "Total: $1,200.00")
+    q = quote_for(passage, "February 21, 2024: initial examination after the accident")
+    assert "02/21/2024" in q and len(q) <= 220
+
+
+def test_value_found_elsewhere_on_the_cited_page_is_not_flagged():
+    """A date in the page header (outside the passage the model saw) must not be flagged."""
+    from ime_copilot.schemas import Page
+    filler = " ".join(f"word{i}" for i in range(260))
+    page = Page(page_no=7, text=f"Visit date 02/21/2024\n{filler}\nPatient seen for initial examination after the accident.")
+
+    def model(name, user):
+        if "PASSAGES" not in user:
+            return "{}"
+        n = re.findall(r"\[(\d+)\] \(p\. 7,[^)]*\)\n[^\n]*initial examination", user)[0]
+        return json.dumps({"answer": f"Initial examination on 02/21/2024 [{n}]. A recheck on 01/02/2099 [{n}].",
+                           "cpt_codes": []})
+    gw = Gateway(_settings(answer="gemma4:26b-a4b"), provider=FakeProvider(model))
+    r = CaseQA([page], [], gateway=gw, use_embeddings=False).ask("When was the initial examination?")
+    assert r.method == "model"
+    flagged = " ".join(r.warnings)
+    assert "02/21/2024" not in flagged and "01/02/2099" in flagged

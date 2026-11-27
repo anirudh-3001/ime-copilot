@@ -69,12 +69,17 @@ pages most related to the question. Each passage shows its page number and page 
 How to answer:
 - Think like an analyst, not a search engine: connect information across passages, put events in
   date order, work out time spans and counts, and point out conflicts, gaps or missing records.
+- Keep care for the claimed injury separate from records dated before the injury and from
+  unrelated care (other illnesses, routine visits). Leave those out unless they matter to the
+  question (for example prior injuries to the same body part), and label them when you include them.
+- When you state a time span, give both dates (e.g. "from 02/21/2024 to 08/03/2026, about ...").
 - Answer the question directly in the first sentence, then give the supporting details.
 - Write clear, complete sentences in a professional clinical tone. Use short bullet points ("- ")
   for lists of visits, dates, treatments or findings.
 - Be specific: dates, providers, body parts, findings, CPT codes, units and billed amounts.
-- After every fact, put the number of the passage or case fact it came from in square brackets,
-  e.g. [2] or [F3]. Use only numbers that exist. Never write page numbers yourself. The overview
+- After every fact, put the number of the passage or case fact that directly supports it in square
+  brackets, e.g. [2] or [F3]: cite the one or two best sources, not every passage. Use only numbers
+  that exist. Never write page numbers yourself. The overview
   and conversation are background only: don't cite them, cite the passage or fact instead.
 - For dates, timelines, "how long", counts and totals, use the CASE FACTS. "Until now" means up
   to the most recent date in the file; say what that date is.
@@ -256,7 +261,11 @@ class CaseQA:
                 result.warnings.append(f"The {task} model's answer had no usable source markers.")
             return None
 
-        cited_text = " ".join(h.passage.text for h in hits) + " " + " ".join(f["text"] for f in self.facts)
+        answer, span_notes = fix_time_spans(answer)
+        result.warnings += span_notes
+        cited_pages = {s.page for s in sources}
+        cited_text = (" ".join(self.pages_by_no[p].text for p in cited_pages if p in self.pages_by_no) + " "
+                      + " ".join(h.passage.text for h in hits) + " " + " ".join(f["text"] for f in self.facts))
         missing = _unsupported_values(answer, cited_text)
         if missing:
             result.warnings.append("Check these in the source pages; they were not found in the cited text: "
@@ -282,6 +291,85 @@ class CaseQA:
             return NOT_FOUND, []
         lines = "\n".join(f"- p. {s.page}: “{s.quote}”" for s in sources)
         return f"Best-matching passages in the document (no AI model used):\n{lines}", sources
+
+
+def quote_for(text: str, context: str, max_chars: int = 220) -> str:
+    """The short stretch of a passage that best supports a sentence: lines that contain the
+    sentence's own dates score highest, then shared words. Long lines are cut to a window."""
+    want_dates = set(_dates(context))
+    terms = set(tokenize(context))
+    candidates = []
+    for piece in re.split(r"\n|(?<=[.!?])\s+", text):
+        words = piece.split()
+        if len(" ".join(words)) <= max_chars:
+            candidates.append(" ".join(words))
+        else:                                   # long run-on OCR line: look at overlapping windows
+            for start in range(0, max(1, len(words) - 8), 10):
+                candidates.append(" ".join(words[start:start + 24]))
+    candidates = [c for c in candidates if len(c) > 15] or [" ".join(text.split()[:30])]
+
+    def score(c: str):
+        return (5 * len(want_dates & set(_dates(c))) + len(terms & set(tokenize(c))), -abs(len(c) - 120))
+    best = max(candidates, key=score)
+    if len(best) > max_chars:
+        best = best[:max_chars].rsplit(" ", 1)[0]
+    return best
+
+
+_NUM_WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve".split())}
+_SPAN = re.compile(r"(?:(?:approximately|about|roughly|nearly|almost|over|just over|around)\s+)?"
+                   r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(years?|months?|weeks?|days?)"
+                   r"(?:,?\s*(?:and\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+                   r"(months?|weeks?|days?))?", re.IGNORECASE)
+_UNIT_DAYS = {"year": 365.25, "month": 30.44, "week": 7, "day": 1}
+
+
+def _span_days(m: re.Match) -> float:
+    total = 0.0
+    for num, unit in ((m.group(1), m.group(2)), (m.group(3), m.group(4))):
+        if num and unit:
+            n = _NUM_WORDS.get(num.lower(), None)
+            n = int(num) if n is None else n
+            total += n * _UNIT_DAYS[unit.lower().rstrip("s")]
+    return total
+
+
+def _format_span(days: float) -> str:
+    if days < 60:
+        return f"about {round(days)} days"
+    years, months = int(days // 365.25), round((days % 365.25) / 30.44)
+    if months == 12:
+        years, months = years + 1, 0
+    parts = ([f"{years} year{'s' if years != 1 else ''}"] if years else []) + \
+            ([f"{months} month{'s' if months != 1 else ''}"] if months else [])
+    return "about " + " and ".join(parts)
+
+
+def fix_time_spans(text: str) -> tuple[str, list[str]]:
+    """Models are poor at date arithmetic. Where a sentence gives two or more dates and a length of
+    time, recompute the length from the earliest and latest date and correct it if it's off."""
+    import datetime as _dt
+    notes, out = [], []
+    for sentence in re.split(r"(?<=[.!?])\s+|(?<=\n)", text):
+        dates = sorted(_dates(sentence))
+        span = _SPAN.search(sentence)
+        if len(dates) >= 2 and span:
+            try:
+                d1, d2 = _dt.date(*dates[0]), _dt.date(*dates[-1])
+            except ValueError:
+                out.append(sentence)
+                continue
+            actual, stated = (d2 - d1).days, _span_days(span)
+            if actual > 0 and abs(actual - stated) > max(31, 0.1 * actual):
+                fixed = _format_span(actual)
+                notes.append(f"Corrected a time span: the model wrote \"{span.group(0).strip()}\", but "
+                             f"{d1:%m/%d/%Y} to {d2:%m/%d/%Y} is {fixed}.")
+                sentence = sentence[:span.start()] + fixed + sentence[span.end():]
+        out.append(sentence)
+    joined = ""
+    for i, part in enumerate(out):                 # re-join with the spaces the split removed
+        joined += part if (i == 0 or joined.endswith("\n")) else " " + part
+    return joined, notes
 
 
 def _best_line(text: str, terms: set[str], max_len: int = 300) -> str:
@@ -346,7 +434,7 @@ def _resolve_passage_markers(answer: str, hits: list[Hit], pages_by_no: dict[int
                 continue
             passage = hits[n - 1].passage
             context = next((s for s in sentences if m.group(0) in s), answer)
-            quote = _best_line(passage.text, set(tokenize(_MARKER.sub(" ", context))))
+            quote = quote_for(passage.text, _MARKER.sub(" ", context))
             if quote and quote_on_page(Citation(page_no=passage.page_no, quote=quote), pages_by_no):
                 sources.append(SourceRef(page=passage.page_no, quote=quote))
             if passage.page_no not in pages:
