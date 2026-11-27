@@ -347,29 +347,33 @@ def _format_span(days: float) -> str:
 
 def fix_time_spans(text: str) -> tuple[str, list[str]]:
     """Models are poor at date arithmetic. Where a sentence gives two or more dates and a length of
-    time, recompute the length from the earliest and latest date and correct it if it's off."""
+    time, recompute the length from the earliest and latest date and correct it if it's off.
+    Line breaks, spacing and markdown are kept exactly as written."""
     import datetime as _dt
-    notes, out = [], []
-    for sentence in re.split(r"(?<=[.!?])\s+|(?<=\n)", text):
+    notes: list[str] = []
+
+    def fix_sentence(sentence: str) -> str:
         dates = sorted(_dates(sentence))
         span = _SPAN.search(sentence)
-        if len(dates) >= 2 and span:
-            try:
-                d1, d2 = _dt.date(*dates[0]), _dt.date(*dates[-1])
-            except ValueError:
-                out.append(sentence)
-                continue
-            actual, stated = (d2 - d1).days, _span_days(span)
-            if actual > 0 and abs(actual - stated) > max(31, 0.1 * actual):
-                fixed = _format_span(actual)
-                notes.append(f"Corrected a time span: the model wrote \"{span.group(0).strip()}\", but "
-                             f"{d1:%m/%d/%Y} to {d2:%m/%d/%Y} is {fixed}.")
-                sentence = sentence[:span.start()] + fixed + sentence[span.end():]
-        out.append(sentence)
-    joined = ""
-    for i, part in enumerate(out):                 # re-join with the spaces the split removed
-        joined += part if (i == 0 or joined.endswith("\n")) else " " + part
-    return joined, notes
+        if len(dates) < 2 or not span:
+            return sentence
+        try:
+            d1, d2 = _dt.date(*dates[0]), _dt.date(*dates[-1])
+        except ValueError:
+            return sentence
+        actual, stated = (d2 - d1).days, _span_days(span)
+        if actual <= 0 or abs(actual - stated) <= max(31, 0.1 * actual):
+            return sentence
+        fixed = _format_span(actual)
+        notes.append(f"Corrected a time span: the model wrote \"{span.group(0).strip()}\", but "
+                     f"{d1:%m/%d/%Y} to {d2:%m/%d/%Y} is {fixed}.")
+        return sentence[:span.start()] + fixed + sentence[span.end():]
+
+    out_lines = []
+    for line in text.split("\n"):
+        parts = re.split(r"((?<=[.!?])[ \t]+)", line)        # keeps the separators
+        out_lines.append("".join(fix_sentence(x) if i % 2 == 0 else x for i, x in enumerate(parts)))
+    return "\n".join(out_lines), notes
 
 
 def _best_line(text: str, terms: set[str], max_len: int = 300) -> str:

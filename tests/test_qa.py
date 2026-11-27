@@ -254,3 +254,15 @@ def test_value_found_elsewhere_on_the_cited_page_is_not_flagged():
     assert r.method == "model"
     flagged = " ".join(r.warnings)
     assert "02/21/2024" not in flagged and "01/02/2099" in flagged
+
+
+def test_span_fix_keeps_markdown_line_breaks():
+    from ime_copilot.rag.qa import fix_time_spans
+    md = ("## Claimant overview\n- Date of injury: 02/20/2024 (p. 1).\n- Seen.  Twice.\n\n"
+          "## Treatment\nTreated for about 6 months, from 02/21/2024 to 08/03/2026 (p. 9).\n- Next bullet")
+    text, notes = fix_time_spans(md)
+    assert text.split("\n")[0] == "## Claimant overview" and "\n- Date of injury" in text
+    assert "- Seen.  Twice." in text and "\n\n## Treatment\n" in text and text.endswith("\n- Next bullet")
+    assert "about 2 years and 5 months" in text and len(notes) == 1
+    same, none = fix_time_spans("## A\n- b. c\n\n- d")
+    assert same == "## A\n- b. c\n\n- d" and none == []

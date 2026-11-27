@@ -46,11 +46,18 @@ medical examination (IME). Below is a sample of one claim file: a fact sheet com
 bill in the file, and numbered passages from the file's most relevant pages.
 
 Write your own understanding of this case for the examining physician, in the structure you think
-fits this case best. Use short "## " headings, short paragraphs and "- " bullet points. Typically
-cover who the claimant is, what happened, the course of treatment over time, the current status,
-and what the examiner should pay attention to (for example gaps in treatment, inconsistencies
-between records, prior injuries, missing records, or open questions). Lead with the most
-important points. Be specific: dates, providers, body parts, findings, treatments and amounts.
+fits this case best. Use short "## " headings, short paragraphs and "- " bullet points, each heading
+and bullet on its own line. Typically cover who the claimant is, what happened, a short dated
+timeline of the key events after the injury, the course of treatment, the current status, and what
+the examiner should pay attention to (for example gaps in treatment, inconsistencies between
+records, prior injuries, missing records, or open questions). Lead with the most important points.
+Be specific: dates, providers, body parts, findings, treatments and amounts.
+
+Check the date of every encounter against the date of injury. Keep care for the claimed injury
+separate from records dated before the injury and from unrelated care (other illnesses, emergency
+visits for unrelated complaints, routine checkups): don't describe those as part of the injury.
+Mention them briefly under their own heading only where they matter (for example a prior injury
+to the same body part, or a condition that could affect recovery).
 
 Rules:
 - Use only what the fact sheet and passages say; if something important is unclear or missing, say so.
