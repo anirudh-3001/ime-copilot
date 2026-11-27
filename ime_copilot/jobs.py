@@ -89,11 +89,13 @@ def _run(pdf_path: Path, case_id: str, settings: Settings, storage, page_range) 
 
 def _summarize(qa, case_id: str, settings: Settings) -> None:
     """Write the report-style summary, if an answer model is set (otherwise only the facts show)."""
-    from .case_summary import write_overview
+    from .case_summary import build_summary, case_context, write_overview
+    from .db import get_engine
     if qa.gateway is None or not qa.gateway.has_model("answer"):
         return
     try:
-        write_overview(qa, settings.index_dir, case_id,
+        context = case_context(build_summary(get_engine(settings.db_url), case_id))
+        write_overview(qa, settings.index_dir, case_id, case_context=context,
                        on_progress=lambda d, t: _update(case_id, "summarizing", d, t))
     except Exception as err:  # noqa: BLE001 - questions still work without the summary
         _update(case_id, "summarizing", 0, 0, summary_error=f"{type(err).__name__}: {err}")
@@ -101,8 +103,7 @@ def _summarize(qa, case_id: str, settings: Settings) -> None:
 
 def start_summary(case_id: str, settings: Settings) -> None:
     """Rewrite the summary for an already processed file (the 'Rewrite summary' button)."""
-    from .case_summary import OVERVIEW_QUESTIONS
-    _update(case_id, "summarizing", 0, len(OVERVIEW_QUESTIONS))
+    _update(case_id, "summarizing", 0, 1)
 
     def run():
         from .db import get_engine

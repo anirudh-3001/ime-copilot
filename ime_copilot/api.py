@@ -161,6 +161,16 @@ def rewrite_summary(case_id: str) -> dict:
     return {"case_id": case_id, "status": "writing"}
 
 
+@app.patch("/cases/{case_id}", dependencies=[Depends(require_key)])
+def rename_case(case_id: str, display_name: str = Body("", embed=True)) -> dict:
+    """Change the label shown in the case list. The original PDF and its id are not changed."""
+    from .db import set_display_name
+    _case_or_404(case_id)
+    name = " ".join(display_name.split())[:120]
+    set_display_name(_engine(), case_id, name)
+    return _case_or_404(case_id)
+
+
 @app.get("/cases/{case_id}", dependencies=[Depends(require_key)])
 def case(case_id: str) -> dict:
     return _case_or_404(case_id)
@@ -188,15 +198,21 @@ def ledger(case_id: str) -> dict:
 
 
 @app.post("/cases/{case_id}/ask", dependencies=[Depends(require_key)])
-def ask(case_id: str, question: str = Body(..., embed=True)) -> dict:
-    """Answer a question about the case: answer text, related CPT codes, source pages."""
+def ask(case_id: str, question: str = Body(..., embed=True),
+        history: list[dict] = Body(default_factory=list, embed=True)) -> dict:
+    """Answer a question about the case: answer text, related CPT codes, source pages.
+    history: the last few turns [{"question", "answer"}], so follow-up questions work."""
+    from .case_summary import load_overview
     from .rag.service import get_qa
     if jobs.is_running(case_id):
         raise HTTPException(status_code=409, detail="This file is still being processed; try again when it's ready.")
     _case_or_404(case_id)
     if not question.strip():
         raise HTTPException(status_code=400, detail="Question is empty.")
-    return get_qa(_engine(), case_id, settings()).ask(question.strip()).model_dump()
+    turns = [{"question": str(h.get("question", ""))[:1000], "answer": str(h.get("answer", ""))[:2000]}
+             for h in history[-3:] if isinstance(h, dict)]
+    overview = (load_overview(settings().index_dir, case_id) or {}).get("text") or None
+    return get_qa(_engine(), case_id, settings()).ask(question.strip(), history=turns, overview=overview).model_dump()
 
 
 @app.get("/", response_class=HTMLResponse)

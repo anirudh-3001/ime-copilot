@@ -51,7 +51,10 @@ def get_qa(engine, case_id: str, settings, refresh: bool = False, on_progress=No
             embed_model = settings.models.get("embed")
             if gateway is not None and embed_model:
                 cache = DiskVectorCache(index_path(settings.index_dir, case_id, embed_model))
-            _CACHE[case_id] = CaseQA(pages, services, gateway, vector_cache=cache, on_progress=on_progress)
+            from ..db import get_case
+            details = (get_case(engine, case_id) or {}).get("details") or {}
+            _CACHE[case_id] = CaseQA(pages, services, gateway, vector_cache=cache, on_progress=on_progress,
+                                     details=details)
         return _CACHE[case_id]
 
 

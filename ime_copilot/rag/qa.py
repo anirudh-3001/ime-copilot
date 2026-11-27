@@ -2,9 +2,12 @@
 
 Flow:
   1. Search (RAG): the most relevant passages from the file, with page numbers.
-  2. Answer: the local model (default) writes an answer from those passages only.
-  3. Verify: every cited page must be among the searched pages and its quote must be
-     on that page; every CPT code must exist in the document. Anything else is dropped.
+  2. Answer: the local model (default) writes an answer from those passages only and
+     marks each fact with the number of the passage it came from, like [3].
+  3. Verify: passage numbers are turned into page numbers by the system, and the quote
+     shown for each page is taken from the page itself, so a page or quote can't be made
+     up. Dates, amounts and codes in the answer are checked against the cited passages
+     (flagged if missing); every CPT code must exist in the document.
   4. If the answer fails verification and an escalation model is configured
      (IME_MODEL_ANSWER_ESCALATE, e.g. Azure OpenAI), the same passages go to it,
      and its answer is verified the same way. Otherwise the best-matching
@@ -56,23 +59,51 @@ class AskResult(BaseModel):
     model_cost_usd: float = 0.0
 
 
-_SYSTEM = """You answer questions about ONE medical claim file, using ONLY the numbered passages given.
-Rules:
-1. Use only facts stated in the passages. Never use outside knowledge about this patient.
-2. Every factual statement must cite its page like (p. 12).
-3. For each citation, copy a short EXACT quote (5 to 25 words) from that page's passage, character for character.
-4. If the passages do not contain the answer, reply exactly: "%s"
-5. Do not give medical opinions (causation, necessity, MMI); report what the records say.
-6. List CPT/HCPCS codes from the passages that relate to the question.
+_SYSTEM = """You are an experienced medical-legal analyst assisting a physician who is preparing an
+independent medical examination (IME). Answer the question about ONE claim file.
+
+You are given: a CASE OVERVIEW (background, may be missing), CASE FACTS computed from every bill in
+the whole file, the RECENT CONVERSATION (for follow-up questions), and numbered PASSAGES from the
+pages most related to the question. Each passage shows its page number and page type.
+
+How to answer:
+- Think like an analyst, not a search engine: connect information across passages, put events in
+  date order, work out time spans and counts, and point out conflicts, gaps or missing records.
+- Answer the question directly in the first sentence, then give the supporting details.
+- Write clear, complete sentences in a professional clinical tone. Use short bullet points ("- ")
+  for lists of visits, dates, treatments or findings.
+- Be specific: dates, providers, body parts, findings, CPT codes, units and billed amounts.
+- After every fact, put the number of the passage or case fact it came from in square brackets,
+  e.g. [2] or [F3]. Use only numbers that exist. Never write page numbers yourself. The overview
+  and conversation are background only: don't cite them, cite the passage or fact instead.
+- For dates, timelines, "how long", counts and totals, use the CASE FACTS. "Until now" means up
+  to the most recent date in the file; say what that date is.
+- Use only what the given material says. If it partly answers, give that part and say what is
+  not found. If it does not answer the question at all, reply exactly: "%s"
+- Do not give your own medical opinion on causation, necessity, MMI or impairment; report and
+  organize what the records say, including any opinions the records themselves contain.
+
 Reply with JSON only:
-{"answer": "<answer with (p. N) citations>", "citations": [{"page": <int>, "quote": "<exact text>"}], "cpt_codes": ["<code>", ...]}""" % NOT_FOUND
+{"answer": "<answer with [n] markers>", "cpt_codes": ["<CPT/HCPCS codes from the material that relate to the question>"]}""" % NOT_FOUND
+
+_PLAN_SYSTEM = """You plan searches in a long medical claim file (medical records, bills, reports).
+Given a question (and possibly the recent conversation, for follow-ups), reply with JSON only:
+{"standalone_question": "<the question rewritten to stand alone, resolving words like 'it' or 'that'>",
+ "searches": ["<2 to 4 short search phrases using words the records would contain>"]}
+Example: "How long was she treated?" -> searches like "initial evaluation date", "most recent visit
+follow-up", "discharged from care", "date of injury"."""
+
+_PAGE_TYPE_LABEL = {"bill": "bill", "office_note": "office note", "pt_note": "therapy note",
+                    "imaging_report": "imaging report", "operative_report": "procedure report",
+                    "referral_letter": "IME referral letter", "other": "record"}
 
 
 class CaseQA:
     """Holds one case's pages, ledger, search index and code mentions; answers questions."""
 
     def __init__(self, pages: list[Page], services: list[ServiceRow], gateway: Gateway | None = None,
-                 use_embeddings: bool = True, vector_cache: dict | None = None, on_progress=None):
+                 use_embeddings: bool = True, vector_cache: dict | None = None, on_progress=None,
+                 details: dict | None = None):
         self.pages = pages
         self.pages_by_no = {p.page_no: p for p in pages}
         self.services = services
@@ -88,10 +119,21 @@ class CaseQA:
             self.notes.append(f"Meaning-based search unavailable ({err}); using keyword search only.")
             self.index = CaseIndex.build(pages)
         self.mentions = find_code_mentions(pages, {s.cpt for s in services})
+        self.facts = case_facts(services, details or {})
 
-    def ask(self, question: str, k: int = 8) -> AskResult:
+    def ask(self, question: str, k: int = 10, history: list[dict] | None = None,
+            overview: str | None = None) -> AskResult:
+        """history: recent turns [{"question", "answer"}] for follow-ups; overview: the case summary text."""
         cost_before = self.gateway.cost_usd if self.gateway else 0.0
-        hits = self.index.search(question, k=k)
+        history = [h for h in (history or []) if h.get("question")][-3:]
+        standalone, searches = self._plan(question, history)
+
+        # Code-aware search: a bill line says "64483 ... 1,150.00", not "epidural injection", so
+        # the codes in this file that match the question's topic are added to the search words.
+        topic_codes = sorted(codes_for_question(standalone, set(), self.mentions, self.services))
+        query = standalone + (" " + " ".join(topic_codes[:20]) if topic_codes else "")
+        hits = _merge_hits([self.index.search(query, k=k)] + [self.index.search(q, k=5) for q in searches],
+                           limit=k + 2)
         searched = sorted({h.passage.page_no for h in hits})
         result = AskResult(question=question, answer=NOT_FOUND, method="extractive", searched_pages=searched,
                            warnings=list(self.notes))
@@ -101,10 +143,11 @@ class CaseQA:
 
         model_reply, llm_codes = None, []
         if self.gateway is not None and self.gateway.has_model("answer"):
-            model_reply = self._model_answer("answer", question, hits, result)
+            context = (history, overview, standalone)
+            model_reply = self._model_answer("answer", question, hits, result, context)
             if model_reply is None and self.gateway.has_model("answer_escalate"):
                 result.warnings.append("Local answer could not be verified; escalated to the second model.")
-                model_reply = self._model_answer("answer_escalate", question, hits, result)
+                model_reply = self._model_answer("answer_escalate", question, hits, result, context)
                 if model_reply is not None:
                     result.method = "escalated"
 
@@ -119,9 +162,13 @@ class CaseQA:
                 result.warnings.append("No answer could be verified against the document; "
                                        "showing the best-matching passages instead.")
             result.answer, result.sources = self._extractive(question, hits)
+            if result.method == "unverified" and result.sources:
+                result.answer = result.answer.replace(
+                    "Best-matching passages in the document (no AI model used):",
+                    "The AI answer could not be checked against the file, so here are the best-matching passages:")
 
         cited_pages = {s.page for s in result.sources}
-        why = codes_for_question(question, cited_pages or set(searched), self.mentions, self.services)
+        why = codes_for_question(standalone, cited_pages or set(searched), self.mentions, self.services)
         in_doc = {m.code for m in self.mentions} | {s.cpt for s in self.services}
         for code in llm_codes:
             code = code.strip().upper()
@@ -134,12 +181,41 @@ class CaseQA:
             result.model_cost_usd = round(self.gateway.cost_usd - cost_before, 6)
         return result
 
+    # ------------------------------------------------------------------ search planning
+    def _plan(self, question: str, history: list[dict]) -> tuple[str, list[str]]:
+        """Ask the model to turn the question into a standalone question + a few search phrases.
+        Any problem (no model, bad reply) just means: search with the question as asked."""
+        if self.gateway is None or not self.gateway.has_model("answer"):
+            return question, []
+        convo = "\n".join(f"Q: {h['question']}\nA: {str(h.get('answer', ''))[:400]}" for h in history)
+        user = (f"RECENT CONVERSATION:\n{convo}\n\n" if convo else "") + f"QUESTION: {question}"
+        try:
+            reply = self.gateway.complete_json("answer", _PLAN_SYSTEM, user, max_tokens=300, attempts=1)
+        except (GatewayError, ValueError):
+            return question, []
+        if not isinstance(reply, dict):
+            return question, []
+        standalone = str(reply.get("standalone_question") or "").strip() or question
+        searches = [str(x).strip() for x in (reply.get("searches") or []) if str(x).strip()][:4]
+        return (standalone if len(standalone) < 500 else question), searches
+
     # ------------------------------------------------------------------ model answer
-    def _model_answer(self, task: str, question: str, hits: list[Hit], result: AskResult):
+    def _model_answer(self, task: str, question: str, hits: list[Hit], result: AskResult, context=None):
+        history, overview, standalone = context or ([], None, question)
         searched = {h.passage.page_no for h in hits}
-        passages = "\n\n".join(f"[p. {h.passage.page_no}]\n{h.passage.text}" for h in hits)
+
+        def header(h: Hit) -> str:
+            page = self.pages_by_no.get(h.passage.page_no)
+            kind = _PAGE_TYPE_LABEL.get(getattr(page, "page_type", "other") or "other", "record")
+            return f"(p. {h.passage.page_no}, {kind})"
+        passages = "\n\n".join(f"[{i}] {header(h)}\n{h.passage.text}" for i, h in enumerate(hits, 1))
         codes_here = sorted({m.code for m in self.mentions if m.page_no in searched})
-        user = (f"QUESTION: {question}\n\nPASSAGES:\n{passages}\n\n"
+        facts = "\n".join(f"[F{i}] {f['text']}" for i, f in enumerate(self.facts, 1)) or "none"
+        convo = "\n".join(f"Q: {h['question']}\nA: {str(h.get('answer', ''))[:600]}" for h in history or [])
+        q_line = question if standalone == question else f"{question}\n(Meaning: {standalone})"
+        user = ((f"CASE OVERVIEW (background, don't cite):\n{overview[:4000]}\n\n" if overview else "")
+                + (f"RECENT CONVERSATION (background, don't cite):\n{convo}\n\n" if convo else "")
+                + f"QUESTION: {q_line}\n\nCASE FACTS (whole file):\n{facts}\n\nPASSAGES:\n{passages}\n\n"
                 f"CPT/HCPCS codes found on these pages: {', '.join(codes_here) or 'none'}")
         try:
             reply = self.gateway.complete_json(task, _SYSTEM, user, max_tokens=1500)
@@ -151,30 +227,42 @@ class CaseQA:
             return None
 
         answer = str(reply.get("answer", "")).strip()
-        sources, dropped = [], 0
+        not_found = normalize(answer).startswith(normalize(NOT_FOUND)[:40])
+        answer, sources, bad = _resolve_passage_markers(answer, hits, self.pages_by_no, self.facts)
+
+        # Older reply style (page + quote) is still accepted, with forgiving quote matching.
         for c in reply.get("citations") or []:
             try:
                 page, quote = int(c.get("page")), str(c.get("quote", "")).strip()
             except (TypeError, ValueError, AttributeError):
-                dropped += 1
+                bad += 1
                 continue
             if page in searched and _quote_ok(page, quote, self.pages_by_no):
                 sources.append(SourceRef(page=page, quote=quote))
+            elif page in searched and (q := _closest_line(page, quote, self.pages_by_no)):
+                sources.append(SourceRef(page=page, quote=q))
             else:
-                dropped += 1
-        if dropped:
-            result.warnings.append(f"{dropped} citation(s) from the {task} model were not found in the document "
-                                   "and were removed.")
+                bad += 1
+        if bad:
+            result.warnings.append(f"{bad} citation(s) from the {task} model pointed to text that was not "
+                                   "in the search results and were removed.")
 
         named_pages = {int(n) for n in re.findall(r"\bp(?:age|g)?\.?\s*(\d{1,5})\b", answer, re.IGNORECASE)}
         bad_pages = sorted(named_pages - {s.page for s in sources} - searched)
-        not_found = normalize(answer).startswith(normalize(NOT_FOUND)[:40])
         if not answer or bad_pages or (not sources and not not_found):
             if bad_pages:
                 result.warnings.append(f"Answer referred to page(s) {bad_pages} that were not in the search results.")
+            elif not not_found:
+                result.warnings.append(f"The {task} model's answer had no usable source markers.")
             return None
+
+        cited_text = " ".join(h.passage.text for h in hits) + " " + " ".join(f["text"] for f in self.facts)
+        missing = _unsupported_values(answer, cited_text)
+        if missing:
+            result.warnings.append("Check these in the source pages; they were not found in the cited text: "
+                                   + ", ".join(missing[:6]))
         model_name = self.gateway.settings.models.get(task)
-        return answer, sources, [str(x) for x in reply.get("cpt_codes") or []], model_name
+        return answer, _dedupe(sources), [str(x) for x in reply.get("cpt_codes") or []], model_name
 
     # ------------------------------------------------------------------ extractive answer
     def _extractive(self, question: str, hits: list[Hit], n: int = 5) -> tuple[str, list[SourceRef]]:
@@ -202,6 +290,195 @@ def _best_line(text: str, terms: set[str], max_len: int = 300) -> str:
         return text.strip()[:max_len]
     best = max(candidates, key=lambda c: (len(terms & set(tokenize(c))), -len(c)))
     return best[:max_len]
+
+
+def _merge_hits(results: list[list[Hit]], limit: int) -> list[Hit]:
+    """Combine several searches: take the best of each in turn, without repeats."""
+    out, seen = [], set()
+    for rank in range(max((len(r) for r in results), default=0)):
+        for res in results:
+            if rank < len(res) and res[rank].passage.pid not in seen and len(out) < limit:
+                seen.add(res[rank].passage.pid)
+                out.append(res[rank])
+    return out
+
+
+_MARKER = re.compile(r"\[(F?\d{1,2}(?:\s*[,;-]\s*F?\d{1,2})*)\]", re.IGNORECASE)
+
+
+def _resolve_passage_markers(answer: str, hits: list[Hit], pages_by_no: dict[int, Page], facts=()):
+    """Turn [n] markers into (p. N) and pick each source quote from the page itself.
+
+    Returns (answer with page numbers, sources, number of invalid markers)."""
+    sources: list[SourceRef] = []
+    bad = 0
+    sentences = re.split(r"(?<=[.!?])\s+|\n", answer)
+
+    def numbers(group: str) -> list:
+        out = []
+        for part in re.split(r"\s*[,;]\s*", group.upper()):
+            fact = part.startswith("F")
+            part = part.replace("F", "")
+            if "-" in part:
+                a, b = (int(x) for x in part.split("-", 1))
+                nums = list(range(a, b + 1)) if 0 < b - a < 10 else [a, b]
+            else:
+                nums = [int(part)] if part.strip() else []
+            out += [("F", n) if fact else n for n in nums]
+        return out
+
+    def repl(m: re.Match) -> str:
+        nonlocal bad
+        pages = []
+        for n in numbers(m.group(1)):
+            if isinstance(n, tuple):                       # [F3]: a case fact from the bills
+                if not 1 <= n[1] <= len(facts):
+                    bad += 1
+                    continue
+                for page, quote in facts[n[1] - 1]["sources"]:
+                    if quote_on_page(Citation(page_no=page, quote=quote), pages_by_no):
+                        sources.append(SourceRef(page=page, quote=quote))
+                    if page not in pages:
+                        pages.append(page)
+                continue
+            if not 1 <= n <= len(hits):
+                bad += 1
+                continue
+            passage = hits[n - 1].passage
+            context = next((s for s in sentences if m.group(0) in s), answer)
+            quote = _best_line(passage.text, set(tokenize(_MARKER.sub(" ", context))))
+            if quote and quote_on_page(Citation(page_no=passage.page_no, quote=quote), pages_by_no):
+                sources.append(SourceRef(page=passage.page_no, quote=quote))
+            if passage.page_no not in pages:
+                pages.append(passage.page_no)
+        return "".join(f" (p. {p})" for p in pages)
+
+    text = _MARKER.sub(repl, answer)
+    text = re.sub(r"\s+(\(p\. \d+\))", r" \1", text)
+    text = re.sub(r"(\(p\. (\d+)\))(\s*\(p\. \2\))+", r"\1", text)     # same page twice in a row
+    text = re.sub(r"[ \t]+([.,;:])", r"\1", text).strip()
+    return text, sources, bad
+
+
+def _months(d1: str, d2: str) -> str:
+    y1, m1, dd1 = (int(x) for x in d1.split("-"))
+    y2, m2, dd2 = (int(x) for x in d2.split("-"))
+    days = (y2 - y1) * 365.25 + (m2 - m1) * 30.44 + (dd2 - dd1)
+    return f"{days / 30.44:.0f} months" if days >= 60 else f"{days:.0f} days"
+
+
+def case_facts(services: list[ServiceRow], details: dict) -> list[dict]:
+    """A short fact sheet computed from the whole file's bills (and the date of injury).
+    Each fact keeps the pages and verified quotes it rests on, so the model can cite it as [F1]."""
+    from .cpt import category
+    facts: list[dict] = []
+    doi = details.get("date_of_injury") if isinstance(details, dict) else None
+    if doi and doi.get("value") and doi.get("citation"):
+        c = doi["citation"]
+        facts.append({"text": f"Date of injury: {doi['value']}", "sources": [(c["page_no"], c["quote"])]})
+    rows = sorted((s for s in services if s.date_of_service), key=lambda s: s.date_of_service)
+    if not rows:
+        return facts
+    first, last = rows[0], rows[-1]
+    total = sum(s.billed_amount or 0 for s in rows)
+    dates = {s.date_of_service for s in rows}
+    facts.append({"text": f"Billed treatment dates: first {first.date_of_service} (CPT {first.cpt}), most recent "
+                          f"{last.date_of_service} (CPT {last.cpt}); a span of about "
+                          f"{_months(first.date_of_service, last.date_of_service)}; {len(dates)} dates of service, "
+                          f"{len(rows)} billed lines, ${total:,.2f} billed in total",
+                  "sources": [(first.citation.page_no, first.citation.quote), (last.citation.page_no, last.citation.quote)]})
+    groups: dict[str, list[ServiceRow]] = {}
+    for s in rows:
+        groups.setdefault(category(s.cpt)[0], []).append(s)
+    for label, g in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:10]:
+        codes = sorted({s.cpt for s in g})
+        g_dates = sorted({s.date_of_service for s in g})
+        facts.append({"text": f"{label} (CPT {', '.join(codes[:6])}): {len(g_dates)} dates of service, {len(g)} lines, "
+                              f"{sum(s.units for s in g)} units, ${sum(s.billed_amount or 0 for s in g):,.2f} billed, "
+                              f"from {g[0].date_of_service} to {g[-1].date_of_service}",
+                      "sources": [(g[0].citation.page_no, g[0].citation.quote),
+                                  (g[-1].citation.page_no, g[-1].citation.quote)]})
+    providers: dict[str, list[ServiceRow]] = {}
+    for s in rows:
+        if s.provider:
+            providers.setdefault(s.provider.strip(), []).append(s)
+    for name, g in sorted(providers.items(), key=lambda kv: -len(kv[1]))[:6]:
+        facts.append({"text": f"Billing provider {name}: {len(g)} lines from {g[0].date_of_service} to "
+                              f"{g[-1].date_of_service}",
+                      "sources": [(g[0].citation.page_no, g[0].citation.quote)]})
+    return facts
+
+
+def _dedupe(sources: list[SourceRef]) -> list[SourceRef]:
+    seen, out = set(), []
+    for s in sources:
+        key = (s.page, normalize(s.quote))
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+                                       "nov", "dec"], 1)}
+_DATE_NUM = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b|\b(\d{4})-(\d{2})-(\d{2})\b")
+_DATE_TXT = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b",
+                       re.IGNORECASE)
+_MONEY = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)")
+_AMOUNT = re.compile(r"\b(\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2})\b")
+
+
+def _dates(text: str) -> dict[tuple, str]:
+    out = {}
+    for m in _DATE_NUM.finditer(text):
+        if m.group(4):
+            y, mo, d = int(m.group(4)), int(m.group(5)), int(m.group(6))
+        else:
+            mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            y += 2000 if y < 100 else 0
+        out[(y, mo, d)] = m.group(0)
+    for m in _DATE_TXT.finditer(text):
+        out[(int(m.group(3)), _MONTHS[m.group(1).lower()[:3]], int(m.group(2)))] = m.group(0)
+    return out
+
+
+def _amounts(text: str, money_only: bool) -> dict[float, str]:
+    out = {}
+    for rx in ((_MONEY,) if money_only else (_MONEY, _AMOUNT)):
+        for m in rx.finditer(text):
+            try:
+                out[round(float(m.group(1).replace(",", "")), 2)] = m.group(0)
+            except ValueError:
+                pass
+    return out
+
+
+def _unsupported_values(answer: str, source_text: str) -> list[str]:
+    """Dates, dollar amounts and CPT codes in the answer that don't appear in the source passages."""
+    missing = []
+    src_dates = _dates(source_text)
+    missing += [shown for key, shown in _dates(answer).items() if key not in src_dates]
+    src_amounts = _amounts(source_text, money_only=False)
+    missing += [shown for value, shown in _amounts(answer, money_only=True).items()
+                if value not in src_amounts and value != 0]
+    src_norm = normalize(source_text)
+    for code in set(re.findall(r"\b(\d{4}[0-9FTU]|[A-V]\d{4})\b", answer)):
+        if code.lower() not in src_norm:
+            missing.append(code)
+    return missing
+
+
+def _closest_line(page: int, quote: str, pages_by_no: dict[int, Page]) -> str | None:
+    """For a slightly misquoted line (OCR typos, spacing): the page line that best matches it."""
+    p = pages_by_no.get(page)
+    words = set(tokenize(quote))
+    if p is None or len(words) < 3:
+        return None
+    lines = [ln.strip() for ln in p.text.splitlines() if len(ln.strip()) > 10]
+    if not lines:
+        return None
+    best = max(lines, key=lambda ln: len(words & set(tokenize(ln))))
+    return best[:300] if len(words & set(tokenize(best))) >= max(3, int(0.6 * len(words))) else None
 
 
 def _quote_ok(page: int, quote: str, pages_by_no: dict[int, Page]) -> bool:

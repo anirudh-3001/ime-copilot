@@ -4,9 +4,11 @@ Two parts:
 1. Facts (instant, built from the processed file, no AI model): case details, what the
    file contains, billing by CPT code, diagnoses, the IME questions, pages to review.
    Every item carries the page it came from.
-2. Overview (on request, written by the answer model): a few standard questions answered
-   with the same search + verification as any question, so every sentence is tied to
-   pages. Saved next to the search index, so it is written once per file.
+2. Written summary (by the answer model): the model reads a wide sample of the file (the
+   whole-file fact sheet plus key passages on the injury, treatment, imaging, diagnoses,
+   work, prior history and the IME questions) and writes what it understands about the
+   case, in its own structure. Each statement is marked with its source, which the
+   system turns into page numbers. Saved next to the search index: written once per file.
 """
 
 from __future__ import annotations
@@ -24,30 +26,41 @@ DETAIL_LABELS = [
     ("ssn_last4", "SSN (last 4)"),
 ]
 
-# The written summary follows the sections of an IME report. Each section is one question,
-# answered with the same search + verification as any question, so every sentence cites pages.
-OVERVIEW_QUESTIONS = [
-    ("hpi", "History of present illness",
-     "How did the injury or accident happen, on what date, what care was received right after it, "
-     "and how has the patient responded to treatment since?"),
-    ("symptoms", "Current symptoms",
-     "What are the patient's current symptoms, pain locations and pain levels? Any numbness, tingling "
-     "or radiating symptoms?"),
-    ("treatment", "Treatment to date",
-     "What treatment has the patient received, such as chiropractic care, physical therapy, injections, "
-     "surgery or other procedures, from which providers, and did it help?"),
-    ("studies", "Diagnostic studies",
-     "What imaging or diagnostic tests were done, such as MRI, X-ray, CT or EMG, and what did they show?"),
-    ("diagnoses", "Diagnoses", "What diagnoses have been given for the patient's injuries?"),
-    ("past", "Past medical and surgical history",
-     "What past medical history, prior injuries, prior surgeries or pre-existing conditions are recorded?"),
-    ("function", "Function and social history",
-     "What activities can the patient no longer do since the injury, what help do they need at home, "
-     "and what are their habits and daily activities?"),
-    ("work", "Work history and status",
-     "What is the patient's job, how has the injury affected their work, and what work restrictions "
-     "or work status have been given?"),
+# Broad searches that together give the model a wide view of the file.
+COVERAGE_QUERIES = [
+    "how the injury or accident happened, mechanism of injury, date of injury",
+    "history of present illness, chief complaint, presenting symptoms",
+    "current symptoms, pain level, physical examination findings",
+    "diagnoses, assessment and plan",
+    "MRI, X-ray, CT, EMG results and impression",
+    "treatment: chiropractic, physical therapy, injections, surgery, medications, response to treatment",
+    "work status, job duties, restrictions, time off work",
+    "past medical history, prior injuries, prior accidents, pre-existing conditions",
+    "IME referral questions to be addressed",
+    "most recent visit, follow-up plan, discharge, maximum medical improvement",
 ]
+MAX_PASSAGES = 24
+
+_SUMMARY_SYSTEM = """You are an experienced medical-legal analyst helping a physician prepare an independent
+medical examination (IME). Below is a sample of one claim file: a fact sheet computed from every
+bill in the file, and numbered passages from the file's most relevant pages.
+
+Write your own understanding of this case for the examining physician, in the structure you think
+fits this case best. Use short "## " headings, short paragraphs and "- " bullet points. Typically
+cover who the claimant is, what happened, the course of treatment over time, the current status,
+and what the examiner should pay attention to (for example gaps in treatment, inconsistencies
+between records, prior injuries, missing records, or open questions). Lead with the most
+important points. Be specific: dates, providers, body parts, findings, treatments and amounts.
+
+Rules:
+- Use only what the fact sheet and passages say; if something important is unclear or missing, say so.
+- After each statement, put the passage or fact number it came from in square brackets, e.g. [4] or [F2].
+  Never write page numbers yourself.
+- Your observations are allowed and useful, but phrase them as observations from the records
+  (e.g. "The records show no treatment between ... and ..."), not as medical conclusions on
+  causation, necessity or impairment: those are the physician's.
+
+Reply with JSON only: {"summary": "<the summary, with [n] markers>"}"""
 
 
 def build_summary(engine, case_id: str) -> dict | None:
@@ -143,23 +156,82 @@ def load_overview(index_dir: str | Path, case_id: str) -> dict | None:
         return None
 
 
+def gather_passages(qa, queries=COVERAGE_QUERIES, per_query: int = 5, limit: int = MAX_PASSAGES):
+    """Take the best passages for each broad query in turn (round robin), without repeats."""
+    results = [qa.index.search(q, k=per_query) for q in queries]
+    hits, seen = [], set()
+    for rank in range(per_query):
+        for res in results:
+            if rank < len(res) and res[rank].passage.pid not in seen and len(hits) < limit:
+                seen.add(res[rank].passage.pid)
+                hits.append(res[rank])
+    return sorted(hits, key=lambda h: (h.passage.page_no, h.passage.pid))
+
+
 def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = "",
-                   on_progress=None) -> dict:
-    """Write the report-style summary (one verified answer per section) and save it."""
-    sections = []
-    for i, (key, title, question) in enumerate(OVERVIEW_QUESTIONS):
-        if on_progress:
-            on_progress(i, len(OVERVIEW_QUESTIONS))
-        r = qa.ask(question)
-        sections.append({"key": key, "title": title, "question": question, "answer": r.answer,
-                         "method": r.method, "sources": [x.model_dump() for x in r.sources],
-                         "cpt_codes": [c.code for c in r.cpt_codes]})
+                   on_progress=None, case_context: str = "") -> dict:
+    """Ask the model to write its own understanding of the case, then link it to pages and save it."""
+    from .rag.qa import _resolve_passage_markers, _unsupported_values
     if on_progress:
-        on_progress(len(OVERVIEW_QUESTIONS), len(OVERVIEW_QUESTIONS))
+        on_progress(0, 1)
+    hits = gather_passages(qa)
+    facts = "\n".join(f"[F{i}] {f['text']}" for i, f in enumerate(qa.facts, 1)) or "none"
+    passages = "\n\n".join(f"[{i}] (p. {h.passage.page_no})\n{h.passage.text}" for i, h in enumerate(hits, 1))
+    user = (f"{case_context}\n\nFACT SHEET (whole file):\n{facts}\n\nPASSAGES:\n{passages}").strip()
+
     settings = getattr(qa.gateway, "settings", None)
-    out = {"case_id": case_id, "processed_at": processed_at, "sections": sections,
-           "model": settings.models.get("answer") if settings else None}
+    out = {"version": 2, "case_id": case_id, "processed_at": processed_at,
+           "model": settings.models.get("answer") if settings else None,
+           "text": "", "sources": [], "warnings": [], "method": "model",
+           "pages_read": sorted({h.passage.page_no for h in hits})}
+    try:
+        reply = qa.gateway.complete_json("answer", _SUMMARY_SYSTEM, user, max_tokens=3000)
+        raw = str((reply or {}).get("summary") or (reply or {}).get("answer") or "").strip() \
+            if isinstance(reply, dict) else ""
+    except Exception as err:  # noqa: BLE001 - shown on the page with a retry button
+        raw = ""
+        out["warnings"].append(f"The model could not write the summary: {err}")
+    if raw:
+        text, sources, bad = _resolve_passage_markers(raw, hits, qa.pages_by_no, qa.facts)
+        out["text"] = text
+        seen, uniq = set(), []
+        for x in sources:
+            if (x.page, x.quote) not in seen:
+                seen.add((x.page, x.quote))
+                uniq.append(x.model_dump())
+        out["sources"] = uniq
+        if bad:
+            out["warnings"].append(f"{bad} source marker(s) didn't match the passages and were removed.")
+        if not sources:
+            out["method"] = "unlinked"
+            out["warnings"].append("The model didn't mark its sources, so this summary isn't linked to pages.")
+        missing = _unsupported_values(text, " ".join(h.passage.text for h in hits) + " "
+                                      + " ".join(f["text"] for f in qa.facts))
+        if missing:
+            out["warnings"].append("Check these in the file; they weren't found in the text the model read: "
+                                   + ", ".join(missing[:8]))
+    elif not out["warnings"]:
+        out["warnings"].append("The model returned an empty summary.")
+    if not out["text"]:
+        out["method"] = "failed"
+    if on_progress:
+        on_progress(1, 1)
     path = overview_path(index_dir, case_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return out
+
+
+def case_context(facts: dict | None) -> str:
+    """Case details and what the file contains, as plain text for the summary prompt."""
+    if not facts:
+        return ""
+    lines = ["CASE DETAILS (read from the file):"]
+    lines += [f"- {d['label']}: {d['value']}" for d in facts["details"] if d["field"] != "ssn_last4"]
+    f = facts["file"]
+    lines.append(f"- The file has {f['pages']} pages ({f['duplicates']} duplicates); page types: "
+                 + ", ".join(f"{t['type'].replace('_', ' ')} {t['count']}" for t in f["page_types"]))
+    if facts["questions"]:
+        lines.append("IME QUESTIONS:")
+        lines += [f"- {q['number']}. {q['text']}" for q in facts["questions"][:15]]
+    return "\n".join(lines)

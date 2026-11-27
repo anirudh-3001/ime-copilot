@@ -133,8 +133,13 @@ def _ask(args, settings) -> int:
     print(f"Ready: {len(qa.pages)} pages | answering with: {model or 'no model (extractive search only)'}",
           file=sys.stderr)
 
+    from .case_summary import load_overview
+    overview = (load_overview(settings.index_dir, case_id) or {}).get("text") or None
+    history: list[dict] = []
+
     def one(question: str) -> None:
-        r = qa.ask(question)
+        r = qa.ask(question, history=history, overview=overview)
+        history.append({"question": question, "answer": r.answer})
         print(result_json(r) if args.json else result_text(r))
 
     if args.question:

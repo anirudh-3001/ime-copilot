@@ -27,6 +27,7 @@ cases = Table(
     Column("page_count", Integer, nullable=False),
     Column("model_cost_usd", Float, default=0.0),
     Column("details_json", Text),                    # CaseDetails: name, DOB, claim no... with citations
+    Column("display_name", Text),                    # label shown in the case list (editable)
     Column("processed_at", DateTime(timezone=True)),
 )
 
@@ -48,7 +49,7 @@ pages = Table(
 )
 
 # Columns added after the first release; created on old SQLite dev databases.
-_ADDED_COLUMNS = {"cases": {"details_json": "TEXT"}, "pages": {"low_confidence_words": "FLOAT", "angle": "FLOAT", "tables_json": "TEXT"}}
+_ADDED_COLUMNS = {"cases": {"details_json": "TEXT", "display_name": "TEXT"}, "pages": {"low_confidence_words": "FLOAT", "angle": "FLOAT", "tables_json": "TEXT"}}
 
 services = Table(
     "services", metadata,
@@ -135,6 +136,7 @@ def save_case(engine: Engine, result: CaseResult) -> None:
     """Replace any earlier run of this case with the new result."""
     cid = result.case_id
     with engine.begin() as conn:
+        old = conn.execute(select(cases.c.display_name).where(cases.c.case_id == cid)).first()
         for table in (pages, services, diagnoses, questions):
             conn.execute(delete(table).where(table.c.case_id == cid))
         conn.execute(delete(cases).where(cases.c.case_id == cid))
@@ -142,7 +144,7 @@ def save_case(engine: Engine, result: CaseResult) -> None:
         conn.execute(cases.insert().values(
             case_id=cid, source_file=result.source_file, page_count=len(result.pages),
             model_cost_usd=result.model_cost_usd, details_json=result.details.model_dump_json(),
-            processed_at=datetime.now(timezone.utc),
+            processed_at=datetime.now(timezone.utc), display_name=old[0] if old else None,
         ))
         if result.pages:
             conn.execute(pages.insert(), [
@@ -191,6 +193,12 @@ def _with_details(row: dict) -> dict:
 
 def list_cases(engine: Engine) -> list[dict]:
     return [_with_details(r) for r in _rows(engine, select(cases).order_by(cases.c.processed_at.desc()))]
+
+
+def set_display_name(engine: Engine, case_id: str, name: str | None) -> bool:
+    with engine.begin() as conn:
+        res = conn.execute(cases.update().where(cases.c.case_id == case_id).values(display_name=name or None))
+    return res.rowcount > 0
 
 
 def get_case(engine: Engine, case_id: str) -> dict | None:

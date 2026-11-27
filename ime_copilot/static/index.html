@@ -41,6 +41,20 @@
   .case:hover { background:var(--sunk); }
   .case.active { background:var(--accent-soft); }
   .case b { display:block; font-weight:600; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .caserow { position:relative; }
+  .caserow .edit { position:absolute; right:6px; top:8px; border:0; background:none; color:var(--muted); padding:2px 6px; border-radius:6px; opacity:0; }
+  .caserow:hover .edit, .caserow .edit:focus { opacity:1; }
+  .caserow .edit:hover { background:var(--line); color:var(--text); }
+  .case .sub { display:block; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .case .file { display:block; color:var(--muted); font-size:11.5px; opacity:.8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .case .warnname { color:var(--warn); }
+  .finder { margin:2px 14px 6px; position:relative; }
+  .finder input, .rename input { width:100%; padding:7px 9px 7px 30px; border:1px solid var(--line); border-radius:9px; background:var(--sunk); color:var(--text); font:inherit; font-size:13.5px; }
+  .finder::before { content:"⌕"; position:absolute; left:10px; top:5px; color:var(--muted); font-size:16px; }
+  .rename { padding:6px 10px; } .rename input { padding-left:9px; }
+  .count { float:right; text-transform:none; letter-spacing:0; font-weight:500; }
+  .md h3 { font-size:14.5px; margin:14px 0 4px; } .md h3:first-child { margin-top:0; }
+  .md ul { margin:4px 0 8px; padding-left:20px; } .md li { margin:2px 0; } .md p { margin:4px 0 8px; }
   .case span { color:var(--muted); font-size:12.5px; }
   .job { margin:0 14px 10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:var(--sunk); font-size:13px; }
   .job .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -155,7 +169,8 @@
     </div>
     <div id="jobs"></div>
     <div class="key" id="keyBox"><input type="password" id="key" placeholder="API key from .env" aria-label="API key"></div>
-    <div class="section-label">Case files</div>
+    <div class="section-label">Case files <span class="count" id="caseCount"></span></div>
+    <div class="finder"><input type="search" id="find" placeholder="Find patient, claim no., DOB…" aria-label="Find a case"></div>
     <div class="cases" id="cases"></div>
     <div class="foot" id="foot">Loading…</div>
   </aside>
@@ -174,7 +189,7 @@
     <div class="thread" id="thread"></div>
     <div class="composer">
       <form id="askForm">
-        <textarea id="question" rows="1" placeholder="Ask about this file, e.g. What physical therapy was billed?" aria-label="Question"></textarea>
+        <textarea id="question" rows="1" placeholder="Ask about this file. Follow-up questions work too." aria-label="Question"></textarea>
         <button class="btn" id="askBtn" type="submit">Ask</button>
       </form>
     </div>
@@ -232,25 +247,72 @@ async function loadHealth() {
   } catch (e) { $('foot').textContent = 'Server not reachable.'; }
 }
 
+const detail = (c, k) => ((c.details || {})[k] || {}).value || '';
+function caseLabel(c) { return c.display_name || detail(c, 'patient_name') || c.case_id; }
+function caseSub(c) {
+  const bits = [];
+  if (detail(c, 'date_of_injury')) bits.push('DOI ' + detail(c, 'date_of_injury'));
+  if (detail(c, 'claim_number')) bits.push('Claim ' + detail(c, 'claim_number'));
+  bits.push(Number(c.page_count).toLocaleString() + ' pages');
+  return bits.join(' · ');
+}
+function caseMatches(c, q) {
+  if (!q) return true;
+  const hay = [caseLabel(c), c.case_id, detail(c, 'patient_name'), detail(c, 'claim_number'), detail(c, 'date_of_birth'),
+               detail(c, 'date_of_injury'), detail(c, 'employer'), detail(c, 'insurer')].join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
+}
+
 async function loadCases(select) {
   try { state.cases = await api('/cases'); }
   catch (e) { $('cases').innerHTML = `<div class="muted" style="padding:8px 10px">${esc(e.message)}</div>`; return; }
+  renderCases();
   const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing'].includes(jobs[id].stage)));
-  const shown = state.cases.filter(c => !running.has(c.case_id));
-  $('cases').innerHTML = shown.map(c =>
-    `<button class="case${c.case_id === state.current ? ' active' : ''}" data-id="${esc(c.case_id)}">
-       <b>${esc(c.case_id)}</b><span>${Number(c.page_count).toLocaleString()} pages</span></button>`).join('')
-    || '<div class="muted" style="padding:8px 10px">No files yet. Upload a PDF above.</div>';
-  document.querySelectorAll('.case').forEach(b => b.onclick = () => selectCase(b.dataset.id));
+  const ready = state.cases.filter(c => !running.has(c.case_id));
   if (select) selectCase(select);
-  else if (!state.current && shown.length) selectCase(shown[0].case_id);
+  else if (!state.current && ready.length) selectCase(ready[0].case_id);
+}
+
+function renderCases() {
+  const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing'].includes(jobs[id].stage)));
+  const q = $('find').value.trim();
+  const ready = state.cases.filter(c => !running.has(c.case_id));
+  const shown = ready.filter(c => caseMatches(c, q));
+  $('caseCount').textContent = ready.length ? (q ? `${shown.length} of ${ready.length}` : ready.length) : '';
+  $('cases').innerHTML = shown.map(c => {
+    const label = caseLabel(c), named = c.display_name || detail(c, 'patient_name');
+    return `<div class="caserow"><button class="case${c.case_id === state.current ? ' active' : ''}" data-id="${esc(c.case_id)}">
+       <b class="${named ? '' : 'warnname'}">${esc(label)}</b><span class="sub">${esc(caseSub(c))}</span>
+       ${label !== c.case_id ? `<span class="file">${esc(c.case_id)}.pdf</span>` : ''}</button>
+       <button class="edit" data-id="${esc(c.case_id)}" title="Rename" aria-label="Rename ${esc(label)}">✎</button></div>`;
+  }).join('') || `<div class="muted" style="padding:8px 10px">${q ? 'No case matches “' + esc(q) + '”.' : 'No files yet. Upload a PDF above.'}</div>`;
+  document.querySelectorAll('.case').forEach(b => b.onclick = () => selectCase(b.dataset.id));
+  document.querySelectorAll('.caserow .edit').forEach(b => b.onclick = ev => { ev.stopPropagation(); startRename(b.dataset.id, b.parentElement); });
+}
+$('find').addEventListener('input', renderCases);
+
+function startRename(id, row) {
+  const c = state.cases.find(x => x.case_id === id); if (!c) return;
+  row.innerHTML = `<div class="rename"><input value="${esc(caseLabel(c) === c.case_id ? '' : caseLabel(c))}"
+    placeholder="${esc(detail(c, 'patient_name') || 'Patient name')}" aria-label="Case name">
+    <div class="muted small" style="margin-top:3px">Enter to save · Esc to cancel · empty = use the name found in the file</div></div>`;
+  const input = row.querySelector('input'); input.focus(); input.select();
+  input.onkeydown = async ev => {
+    if (ev.key === 'Escape') { renderCases(); return; }
+    if (ev.key !== 'Enter') return;
+    try { await api(`/cases/${encodeURIComponent(id)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                                     body: JSON.stringify({display_name: input.value})}); }
+    catch (e) { alert(e.message); }
+    await loadCases(); if (state.current === id) selectCase(id);
+  };
+  input.onblur = () => setTimeout(() => { if (document.activeElement !== input) renderCases(); }, 150);
 }
 
 function selectCase(id) {
   const c = state.cases.find(x => x.case_id === id);
   state.current = id; state.pageCount = c ? c.page_count : 0;
-  $('caseTitle').textContent = id;
-  $('caseMeta').textContent = c ? `${Number(c.page_count).toLocaleString()} pages` : '';
+  $('caseTitle').textContent = c ? caseLabel(c) : id;
+  $('caseMeta').textContent = c ? (caseLabel(c) !== id ? `${id}.pdf · ` : '') + `${Number(c.page_count).toLocaleString()} pages` : '';
   document.querySelectorAll('.case').forEach(b => b.classList.toggle('active', b.dataset.id === id));
   renderThread();
   $('summary').hidden = true; sumTab = 'summary';
@@ -346,15 +408,17 @@ async function ask(q) {
   if (!state.current) { $('caseTitle').textContent = 'Upload or choose a case file first'; return; }
   const caseId = state.current;
   const list = state.threads[caseId] = state.threads[caseId] || [];
+  const hist = (state.hist = state.hist || {})[caseId] = state.hist[caseId] || [];
   const el = document.createElement('div'); el.className = 'qa';
   el.innerHTML = `<div class="q">${esc(q)}</div><div class="a"><div class="thinking"><span class="dots"><i></i><i></i><i></i></span>
-    Searching ${state.pageCount ? Number(state.pageCount).toLocaleString() + ' pages' : 'the file'} and writing the answer…</div></div>`;
+    Planning the search, reading ${state.pageCount ? Number(state.pageCount).toLocaleString() + ' pages' : 'the file'} and writing the answer…</div></div>`;
   list.push(el); renderThread();
   $('question').value = ''; $('question').style.height = 'auto'; $('askBtn').disabled = true;
   const t0 = performance.now();
   try {
     const d = await api(`/cases/${encodeURIComponent(caseId)}/ask`, {method:'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: q})});
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: q, history: hist.slice(-3)})});
+    hist.push({question: q, answer: d.answer});
     el.querySelector('.a').innerHTML = answerHtml(d, (performance.now() - t0) / 1000);
     el.querySelectorAll('.pg').forEach(b => b.onclick = () => openPage(caseId, +b.dataset.page, b.dataset.quote));
   } catch (e) {
@@ -478,26 +542,44 @@ function withPages(text, sources) {
                   .replace(/(^|[^>])\bp\.\s*(\d{1,5})\b/g, (m, pre, n) => pre + pageBtn(n, quoteFor[n]));
 }
 
+function mdLite(text, sources) {
+  // headings (## ), bullets (- ), bold (**x**), paragraphs; page markers become buttons
+  const lines = String(text || '').split('\n');
+  let html = '', list = false, para = [];
+  const flushPara = () => { if (para.length) { html += `<p>${para.join(' ')}</p>`; para = []; } };
+  const inline = t => withPages(t, sources).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  for (const raw of lines) {
+    const line = raw.trim();
+    const h = line.match(/^#{1,4}\s+(.*)$/), li = line.match(/^[-*•]\s+(.*)$/);
+    if (h || !line || !li) { if (list) { html += '</ul>'; list = false; } }
+    if (h) { flushPara(); html += `<h3>${inline(h[1].replace(/\*\*/g, ''))}</h3>`; }
+    else if (li) { flushPara(); if (!list) { html += '<ul>'; list = true; } html += `<li>${inline(li[1])}</li>`; }
+    else if (!line) flushPara();
+    else para.push(inline(line));
+  }
+  if (list) html += '</ul>';
+  flushPara();
+  return html;
+}
+
 function overviewHtml(d) {
   if (d.overview_status === 'unavailable')
     return `<div class="muted">A written summary needs an answer model (IME_PROVIDER=local in .env). The billing and case tabs work without one.</div>`;
-  if (d.overview_status === 'writing') {
-    const p = d.overview_progress || {};
-    return `<div class="writing"><span class="dots"><i></i><i></i><i></i></span>Writing the summary${p.total ? ` (section ${Math.min(p.done + 1, p.total)} of ${p.total})` : ''}… You can already ask questions below.</div>`;
-  }
+  if (d.overview_status === 'writing')
+    return `<div class="writing"><span class="dots"><i></i><i></i><i></i></span>The model is reading the file and writing its summary (usually 1–3 minutes)… You can already ask questions below.</div>`;
   if (!d.overview) return `<div class="muted">No written summary yet. <button class="btn" id="rewrite" style="margin-left:8px">Write summary</button></div>`;
-  const NF = 'The retrieved pages of this document do not answer this question.';
-  const secs = d.overview.sections.map(s => {
-    const notFound = !s.answer || s.answer.startsWith(NF.slice(0, 40));
-    const shaky = s.method === 'unverified' || s.method === 'extractive';
-    const body = notFound ? '<span class="muted">Not found in the file.</span>'
-      : shaky ? `<span class="muted small">Could not write a verified summary for this section; closest passages:</span>\n${withPages(s.answer, s.sources)}`
-      : withPages(s.answer, s.sources);
-    return `<div class="sec"><h5>${esc(s.title)}</h5><div class="body">${body}</div></div>`;
-  }).join('');
-  return secs + `<div class="badges"><span class="badge ok">Every sentence checked against the cited pages</span>
-    ${d.overview.model ? `<span>${esc(d.overview.model)}</span>` : ''}
-    <button class="btn ghost" id="rewrite">Rewrite summary</button></div>`;
+  const o = d.overview;
+  if (o.version !== 2)       // summaries written by v0.5: ask for the new kind
+    return `<div class="muted">This summary was written by an older version. <button class="btn" id="rewrite" style="margin-left:8px">Write the new summary</button></div>`;
+  const warns = (o.warnings || []).map(w => `<div class="warning">${esc(w)}</div>`).join('');
+  if (o.method === 'failed')
+    return `${warns}<div class="badges"><button class="btn" id="rewrite">Try again</button></div>`;
+  const badge = o.method === 'model' ? '<span class="badge ok">Written by the model from the file · sources linked to pages</span>'
+                                     : '<span class="badge warn">Not linked to pages: check against the file</span>';
+  return `<div class="md">${mdLite(o.text, o.sources)}</div>${warns}
+    <div class="badges">${badge}${o.model ? `<span>${esc(o.model)}</span>` : ''}
+      ${o.pages_read ? `<span>read ${o.pages_read.length} key pages + facts from every bill</span>` : ''}
+      <button class="btn ghost" id="rewrite">Rewrite summary</button></div>`;
 }
 
 function billingHtml(f) {

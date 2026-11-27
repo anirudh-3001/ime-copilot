@@ -32,11 +32,13 @@ python -m ime_copilot serve       # then open http://127.0.0.1:8000
 Drop a PDF on the left. A progress card shows each step (reading, OCR, analysis, search index) with time left. Then ask questions: every answer has clickable page numbers that open the page with the quote highlighted, a CPT table (code, type, billed lines, units, total, dates, pages) and a badge showing whether the answer was verified against the file.
 
 **Pinned case summary.** Every file gets a summary pinned at the top of its page, with three tabs:
-- *Summary*: written like an IME report (history of present illness, current symptoms, treatment, diagnostic studies, diagnoses, past history, function, work). Written automatically after upload; every sentence links to its page and is checked against it.
+- *Summary*: the model's own understanding of the case, in its own structure: what happened, the course of treatment, current status, and what the examiner should watch for (gaps, inconsistencies, prior injuries). It reads a fact sheet from every bill plus about 24 key passages; every statement links to its page. Written automatically after upload.
 - *Billing*: totals by type and by CPT code (lines, units, amounts, dates, pages) and the top billing providers.
 - *Case & file*: patient, DOB, claim number, date of injury, employer, insurer, the IME referral questions, diagnosis codes, and pages that were hard to read.
 
-*Print* saves it as a PDF. Files processed before this version show a *Write summary* button.
+*Print* saves it as a PDF.
+
+**Finding a patient's file.** The case list shows the patient name found in each file, with date of injury, claim number and the original file name. Type in the search box to filter by name, claim number, date of birth, employer or file name. Click the ✎ pencil to change a label (the PDF itself is never renamed). Files processed before this version show a *Write summary* button.
 
 **Big files are processed once.** OCR results are cached in `data/ocr_cache` and search vectors in `data/index/<case>`. If processing stops (Mac sleeps, Ollama closes), running it again continues where it stopped. Restarting the server or `ask` afterwards loads the case in seconds.
 
@@ -45,7 +47,9 @@ Drop a PDF on the left. A progress card shows each step (reading, OCR, analysis,
 python -m ime_copilot eval-qa     # right page found + CPT recall, per question
 ```
 
-**How answers stay trustworthy:** the model only sees the pages the search found. Every page number it cites must be one of those pages, and its quote must really be on that page. Every CPT code must exist in the document. Anything else is removed. If nothing can be verified, you get the best-matching passages instead, labelled as such.
+**How a question is answered:** (1) the model first turns the question into a few targeted searches (and resolves follow-ups like "what did it show?" using the last few questions); (2) the file is searched with those plus the CPT codes of the question's topic; (3) the model answers from the best passages (each labelled with its page type), a fact sheet from every bill in the file (date of injury, first and last dates of service, totals by treatment type) and the case summary for background, connecting facts across pages like an analyst.
+
+**How answers stay trustworthy:** the model marks each fact with the passage or fact it came from, like [3] or [F2]; the system turns those into page numbers and takes the quote from the page itself, so pages and quotes can't be made up. Dates, dollar amounts and CPT codes in the answer are checked against the cited text and flagged if missing, and every CPT code must exist in the document. If nothing can be verified, you get the best-matching passages instead, clearly labelled.
 
 **Privacy:** keep FileVault on, keep patient PDFs out of iCloud and Drive folders, and never use Ollama models ending in `-cloud`.
 

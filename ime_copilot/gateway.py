@@ -252,7 +252,8 @@ class Gateway:
                 raise GatewayError(f"Cannot set up provider '{name}': {err}") from err
         return self._providers[name]
 
-    def complete_json(self, task: str, system: str, user: str, max_tokens: int = 2000) -> Any:
+    def complete_json(self, task: str, system: str, user: str, max_tokens: int = 2000,
+                      attempts: int | None = None) -> Any:
         spec = self.settings.models.get(task)
         if not spec:
             raise GatewayError(f"No model configured for task '{task}'.")
@@ -263,7 +264,8 @@ class Gateway:
 
         prompt_hash = hashlib.sha256((system + "\n" + user).encode()).hexdigest()
         last_err: Exception | None = None
-        for attempt in range(self.retries):
+        tries = attempts or self.retries
+        for attempt in range(tries):
             start = time.monotonic()
             try:
                 text, tin, tout = provider.complete(model_id, system, user, max_tokens)
@@ -274,8 +276,8 @@ class Gateway:
             except Exception as err:  # noqa: BLE001 - provider errors vary by SDK
                 last_err = err
                 self._log(task, model_id, 0, 0, 0.0, start, prompt_hash, ok=False)
-                time.sleep(min(2 ** attempt, 8) if attempt < self.retries - 1 else 0)
-        raise GatewayError(f"{task} failed after {self.retries} attempts: {last_err}")
+                time.sleep(min(2 ** attempt, 8) if attempt < tries - 1 else 0)
+        raise GatewayError(f"{task} failed after {tries} attempts: {last_err}")
 
     def has_model(self, task: str) -> bool:
         spec = self.settings.models.get(task)
