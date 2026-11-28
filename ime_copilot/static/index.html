@@ -53,6 +53,8 @@
   .finder::before { content:"⌕"; position:absolute; left:10px; top:5px; color:var(--muted); font-size:16px; }
   .rename { padding:6px 10px; } .rename input { padding-left:9px; }
   .count { float:right; text-transform:none; letter-spacing:0; font-weight:500; }
+  details.sec > summary { cursor:pointer; }
+  details.sec > summary h5 { margin:0; }
   .md h3 { font-size:14.5px; margin:14px 0 4px; } .md h3:first-child { margin-top:0; }
   .md ul { margin:4px 0 8px; padding-left:20px; } .md li { margin:2px 0; } .md p { margin:4px 0 8px; }
   .case span { color:var(--muted); font-size:12.5px; }
@@ -267,14 +269,14 @@ async function loadCases(select) {
   try { state.cases = await api('/cases'); }
   catch (e) { $('cases').innerHTML = `<div class="muted" style="padding:8px 10px">${esc(e.message)}</div>`; return; }
   renderCases();
-  const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing'].includes(jobs[id].stage)));
+  const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing', 'cataloguing'].includes(jobs[id].stage)));
   const ready = state.cases.filter(c => !running.has(c.case_id));
   if (select) selectCase(select);
   else if (!state.current && ready.length) selectCase(ready[0].case_id);
 }
 
 function renderCases() {
-  const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing'].includes(jobs[id].stage)));
+  const running = new Set(Object.keys(jobs).filter(id => !['error', 'summarizing', 'cataloguing'].includes(jobs[id].stage)));
   const q = $('find').value.trim();
   const ready = state.cases.filter(c => !running.has(c.case_id));
   const shown = ready.filter(c => caseMatches(c, q));
@@ -360,7 +362,7 @@ async function poll(id) {
   try {
     const s = await api(`/cases/${encodeURIComponent(id)}/status`);
     jobs[id] = s; renderJobs();
-    if (s.stage === 'summarizing' && !opened.has(id)) {     // questions work now; the summary fills in
+    if (['summarizing', 'cataloguing'].includes(s.stage) && !opened.has(id)) {     // questions work now; the summary fills in
       opened.add(id); loadCases(id);
     }
     if (s.stage === 'ready') {
@@ -380,17 +382,17 @@ function fmtTime(s) {
   if (s < 60) return `${Math.max(1, Math.round(s))} s`;
   const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
-const STEP = {uploading: 1, queued: 1, reading: 1, ocr: 2, analyzing: 3, indexing: 4, summarizing: 5, ready: 5};
+const STEP = {uploading: 1, queued: 1, reading: 1, ocr: 2, analyzing: 3, indexing: 4, summarizing: 5, cataloguing: 6, ready: 6};
 function renderJobs() {
   $('jobs').innerHTML = Object.entries(jobs).map(([id, j]) => {
     if (j.stage === 'error') return `<div class="job error"><div class="name">${esc(id)}</div><div class="meta">${esc(j.error || 'Failed')}</div>
       <button class="btn ghost dismiss" data-id="${esc(id)}" style="margin-top:8px">Dismiss</button></div>`;
     const pct = j.total ? Math.round(100 * j.done / j.total) : null;
-    const unit = j.stage === 'indexing' ? 'passages' : j.stage === 'summarizing' ? 'sections' : 'pages';
+    const unit = j.stage === 'indexing' ? 'passages' : j.stage === 'summarizing' ? 'step' : 'pages';
     const counts = j.total > 1 ? `${j.done.toLocaleString()} / ${j.total.toLocaleString()} ${unit}` : '';
     const eta = j.stage_eta_s ? ` · about ${fmtTime(j.stage_eta_s)} left in this step` : '';
     return `<div class="job"><div class="name">${esc(id)}</div>
-      <div>Step ${STEP[j.stage] || 1} of 5: ${esc(j.label || j.stage)}</div>
+      <div>Step ${STEP[j.stage] || 1} of 6: ${esc(j.label || j.stage)}</div>
       <div class="bar${pct == null ? ' indeterminate' : ''}"><i style="width:${pct ?? 30}%"></i></div>
       <div class="meta">${counts}${eta}${j.elapsed_s ? ` · ${fmtTime(j.elapsed_s)} so far` : ''}</div></div>`;
   }).join('');
@@ -506,7 +508,7 @@ async function loadSummary(caseId) {
   $('summary').hidden = false;
   renderSummary(d, caseId);
   setSumOpen($('summary').classList.contains('open') || sumOpen());
-  if (d.overview_status === 'writing') sumTimer = setTimeout(() => loadSummary(caseId), 3000);
+  if (d.overview_status === 'writing' || d.catalog_status === 'building') sumTimer = setTimeout(() => loadSummary(caseId), 4000);
 }
 
 function renderSummary(d, caseId) {
@@ -520,7 +522,7 @@ function renderSummary(d, caseId) {
   const pane = id => `class="tabpane" data-pane="${id}" ${sumTab === id ? '' : 'hidden'}`;
   $('sumBody').innerHTML = `<div class="tabs" role="tablist">${tabs.map(([id, label]) =>
       `<button class="tab${sumTab === id ? ' active' : ''}" data-tab="${id}" role="tab">${esc(label)}</button>`).join('')}</div>
-    <div ${pane('summary')}>${overviewHtml(d)}</div>
+    <div ${pane('summary')}>${overviewHtml(d)}${catalogHtml(d)}</div>
     <div ${pane('billing')}>${billingHtml(f)}</div>
     <div ${pane('file')}>${fileHtml(f)}</div>`;
   $('sumBody').querySelectorAll('.tab').forEach(b => b.onclick = () => {
@@ -529,6 +531,13 @@ function renderSummary(d, caseId) {
     $('sumBody').querySelectorAll('.tabpane').forEach(x => x.hidden = x.dataset.pane !== sumTab);
   });
   $('sumBody').querySelectorAll('.pg').forEach(b => b.onclick = () => openPage(caseId, +b.dataset.page, b.dataset.quote));
+  const cb = $('buildCatalog'); if (cb) cb.onclick = async () => {
+    cb.disabled = true;
+    try { await api(`/cases/${encodeURIComponent(caseId)}/catalog`, {method: 'POST'}); } catch (e) { alert(e.message); }
+    loadSummary(caseId);
+  };
+  $('sumBody').querySelectorAll('.showall').forEach(b => b.onclick = () => {
+    b.closest('details').querySelectorAll('tr.more').forEach(r => r.hidden = false); b.remove(); });
   const rw = $('rewrite'); if (rw) rw.onclick = async () => {
     rw.disabled = true;
     try { await api(`/cases/${encodeURIComponent(caseId)}/summary`, {method: 'POST'}); } catch (e) { alert(e.message); }
@@ -580,6 +589,78 @@ function overviewHtml(d) {
     <div class="badges">${badge}${o.model ? `<span>${esc(o.model)}</span>` : ''}
       ${o.pages_read ? `<span>read ${o.pages_read.length} key pages + facts from every bill</span>` : ''}
       <button class="btn ghost" id="rewrite">Rewrite summary</button></div>`;
+}
+
+function catalogHtml(d) {
+  const c = d.facts.catalog, pages = d.facts.file.pages;
+  if (d.catalog_status === 'unavailable') return '';
+  if (d.catalog_status === 'building') {
+    const p = d.catalog_progress || {};
+    const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
+    return `<div class="sec"><h5>Document catalog</h5><div class="writing"><span class="dots"><i></i><i></i><i></i></span>
+      Reading every page to list documents, providers, procedures and imaging: ${p.done || 0} of ${p.total || '…'} pages
+      ${p.eta_s ? `· about ${fmtTime(p.eta_s)} left` : ''}. The lists and the summary update when it finishes; questions work meanwhile.</div>
+      <div class="bar"><i style="width:${pct}%"></i></div></div>`;
+  }
+  if (!c) {
+    const mins = Math.max(1, Math.round(pages * 6 / 60));
+    return `<div class="sec"><h5>Documents, providers, procedures, imaging</h5><div class="muted">These lists come from the document
+      catalog: the model reads every page once (about ${fmtTime(mins * 60)} for ${pages.toLocaleString()} pages; it can be stopped and resumed).
+      ${d.catalog_error ? `<div class="warning">Last attempt: ${esc(d.catalog_error)}</div>` : ''}
+      <div><button class="btn" id="buildCatalog" style="margin-top:8px">Build document catalog</button></div></div></div>`;
+  }
+  const pg = p => p ? pageBtn(p) : '';
+  const date = x => x ? esc(x) : '<span class="muted">no date</span>';
+  const money2 = v => v == null ? '<span class="muted">–</span>' : money(v);
+  const table = (title, n, head, rows, open = true, limit = 25) => !rows.length ? '' :
+    `<details class="sec" ${open ? 'open' : ''}><summary><h5 style="display:inline">${esc(title)} (${n})</h5></summary>
+      <div class="tablewrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>
+      ${rows.map((r, i) => `<tr${i >= limit ? ' class="more" hidden' : ''}>${r}</tr>`).join('')}</tbody></table></div>
+      ${rows.length > limit ? `<button class="btn ghost showall" style="margin-top:6px">Show all ${rows.length}</button>` : ''}</details>`;
+
+  let html = '';
+  const ba = c.before_after;
+  if (c.surgeries.length) {
+    html += table('Surgeries', c.surgeries.length, ['Date', 'Procedure', 'Surgeon / provider', 'Facility', 'Cost', 'Page'],
+      c.surgeries.map(x => `<td class="num">${date(x.date)}</td><td><b>${esc(x.name)}</b></td><td>${esc(x.provider)}</td>
+        <td>${esc(x.facility)}</td><td class="num">${money2(x.cost)}</td><td>${pg(x.page)}</td>`));
+  }
+  if (ba) {
+    const side = (h, x) => `<td><b>${h}</b><div class="muted small">${date(x.first_date)} to ${date(x.last_date)}</div></td>
+      <td class="num">${x.visits}</td><td>${esc(x.providers.join(', ')) || '–'}</td><td>${esc(x.treatment.join(', ')) || '–'}</td>
+      <td>${esc(x.procedures.join(', ')) || '–'}</td><td class="num">${money2(x.billed || null)}</td>
+      <td>${x.pain_notes.map(n => `${esc(n.pain)} <span class="muted small">(${esc(n.date || '')})</span> ${pg(n.page)}`).join('<br>') || '–'}</td>`;
+    html += `<details class="sec" open><summary><h5 style="display:inline">Before and after surgery (${esc(ba.surgery.name)}, ${esc(ba.surgery.date)})</h5></summary>
+      <div class="tablewrap"><table><thead><tr><th></th><th>Visit dates</th><th>Providers</th><th>Treatment</th><th>Procedures</th><th>Billed</th><th>Pain notes</th></tr></thead>
+      <tbody><tr>${side('Before', ba.before)}</tr><tr>${side('After', ba.after)}</tr></tbody></table></div></details>`;
+  }
+  html += table('Providers', c.providers.length, ['Provider', 'Role', 'Facility', 'Dates', 'Visits', 'What they did', 'Billed'],
+    c.providers.map(x => `<td><b>${esc(x.name)}</b> ${pg(x.pages[0])}</td><td>${esc(x.role)}</td><td>${esc(x.facility)}</td>
+      <td class="num">${x.first_date ? esc(x.first_date) + (x.last_date !== x.first_date ? ' to ' + esc(x.last_date) : '') : '–'}</td>
+      <td class="num">${x.visits}</td><td>${esc(x.performed.join(', ')) || '–'}</td><td class="num">${x.billed ? money(x.billed) : '–'}</td>`), true, 15);
+  html += table('Billed by provider / facility', (c.billed_by || []).length, ['Billed by', 'Lines', 'Billed', 'Dates', 'Codes', 'Pages'],
+    (c.billed_by || []).map(x => `<td><b>${esc(x.name)}</b></td><td class="num">${x.lines}</td><td class="num">${money(x.billed)}</td>
+      <td class="num">${esc(x.first_date)}${x.last_date !== x.first_date ? ' to ' + esc(x.last_date) : ''}</td>
+      <td class="code">${esc(x.codes.join(', '))}</td><td>${x.pages.slice(0, 4).map(pg).join('')}</td>`), true, 15);
+  html += table('Procedures', c.procedures.length, ['Date', 'Procedure', 'CPT', 'Provider', 'Cost', 'Page'],
+    c.procedures.map(x => `<td class="num">${date(x.date)}</td><td>${esc(x.name)}${x.surgery ? ' <span class="badge warn">surgery</span>' : ''}</td>
+      <td class="code">${esc(x.cpt)}</td><td>${esc(x.provider || x.facility)}</td>
+      <td class="num" title="${esc(x.cost_basis)}">${money2(x.cost)}</td><td>${pg(x.page)}</td>`));
+  html += table('Imaging (MRI, X-ray, CT, EMG…)', c.imaging.length, ['Date', 'Study', 'Impression', 'Facility / reader', 'Page'],
+    c.imaging.map(x => `<td class="num">${date(x.date)}</td><td><b>${esc(x.study)}</b></td><td>${esc(x.impression) || '–'}</td>
+      <td>${esc(x.facility || x.provider)}</td><td>${pg(x.page)}</td>`));
+  html += table('Dates of service', c.dates_of_service.length, ['Date', 'Providers', 'Type', 'Pages'],
+    c.dates_of_service.map(x => `<td class="num">${esc(x.date)}</td><td>${esc(x.providers.join(', ') || x.facilities.join(', '))}</td>
+      <td>${esc(x.types.join(', '))}</td><td>${x.pages.slice(0, 4).map(pg).join('')}</td>`), false);
+  html += table('Documents in the file', c.documents.length, ['Date', 'Type', 'Title', 'Provider / facility', 'Pages'],
+    c.documents.map(x => `<td class="num">${date(x.date)}</td><td>${esc(x.doc_type)}</td><td>${esc(x.title)}</td>
+      <td>${esc(x.provider || x.facility)}</td><td>${pg(x.pages[0])}${x.pages.length > 1 ? ` <span class="muted small">to p. ${x.pages[x.pages.length - 1]}</span>` : ''}</td>`), false);
+  html += `<div class="badges"><span class="muted small">From the document catalog: ${c.pages_read.toLocaleString()} pages read
+    ${c.pages_failed ? `(${c.pages_failed} could not be read)` : ''}; items not found on their page were left out (${c.items_dropped}).
+    ${c.bill_lines_added ? `${c.bill_lines_added} bill lines added to Billing.` : ''}
+    ${c.unattributed_billed ? `${money(c.unattributed_billed)} billed without a named provider.` : ''}</span>
+    <button class="btn ghost" id="buildCatalog">Update catalog</button></div>`;
+  return html;
 }
 
 function billingHtml(f) {

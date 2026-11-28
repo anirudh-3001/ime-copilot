@@ -139,14 +139,32 @@ def case_summary(case_id: str) -> dict:
     """The pinned summary: facts from the file (always) + the written summary (once it's done)."""
     from .case_summary import build_summary, load_overview
     _case_or_404(case_id)
-    facts = build_summary(_engine(), case_id)
+    facts = build_summary(_engine(), case_id, settings().index_dir)
     overview = load_overview(settings().index_dir, case_id)
     job = jobs.get_job(case_id) or {}
     status = ("writing" if jobs.is_summarizing(case_id) else "done" if overview
               else "unavailable" if settings().provider == "none" else "not_started")
+    catalog_status = ("building" if jobs.is_cataloguing(case_id) else "done" if facts.get("catalog")
+                      else "unavailable" if settings().provider == "none" else "not_started")
     return {"facts": facts, "overview": overview, "overview_status": status,
             "overview_progress": {"done": job.get("done", 0), "total": job.get("total", 0)}
-            if status == "writing" else None}
+            if status == "writing" else None,
+            "catalog_status": catalog_status,
+            "catalog_progress": {"done": job.get("done", 0), "total": job.get("total", 0),
+                                 "eta_s": job.get("stage_eta_s")} if catalog_status == "building" else None,
+            "catalog_error": job.get("catalog_error")}
+
+
+@app.post("/cases/{case_id}/catalog", dependencies=[Depends(require_key)])
+def build_catalog(case_id: str) -> dict:
+    """Read every page once to list documents, providers, procedures and imaging; then rewrite the summary."""
+    _case_or_404(case_id)
+    if settings().provider == "none":
+        raise HTTPException(status_code=400, detail="The document catalog needs a model (IME_PROVIDER=local).")
+    if jobs.is_running(case_id) or jobs.is_summarizing(case_id) or jobs.is_cataloguing(case_id):
+        raise HTTPException(status_code=409, detail="This file is busy; try again in a moment.")
+    jobs.start_catalog(case_id, settings())
+    return {"case_id": case_id, "status": "building"}
 
 
 @app.post("/cases/{case_id}/summary", dependencies=[Depends(require_key)])
@@ -155,7 +173,7 @@ def rewrite_summary(case_id: str) -> dict:
     _case_or_404(case_id)
     if settings().provider == "none":
         raise HTTPException(status_code=400, detail="No answer model is set, so a written summary isn't available.")
-    if jobs.is_running(case_id) or jobs.is_summarizing(case_id):
+    if jobs.is_running(case_id) or jobs.is_summarizing(case_id) or jobs.is_cataloguing(case_id):
         raise HTTPException(status_code=409, detail="This file is busy; try again in a moment.")
     jobs.start_summary(case_id, settings())
     return {"case_id": case_id, "status": "writing"}

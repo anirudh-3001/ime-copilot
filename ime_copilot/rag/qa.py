@@ -108,7 +108,7 @@ class CaseQA:
 
     def __init__(self, pages: list[Page], services: list[ServiceRow], gateway: Gateway | None = None,
                  use_embeddings: bool = True, vector_cache: dict | None = None, on_progress=None,
-                 details: dict | None = None):
+                 details: dict | None = None, extra_facts: list[dict] | None = None):
         self.pages = pages
         self.pages_by_no = {p.page_no: p for p in pages}
         self.services = services
@@ -124,7 +124,7 @@ class CaseQA:
             self.notes.append(f"Meaning-based search unavailable ({err}); using keyword search only.")
             self.index = CaseIndex.build(pages)
         self.mentions = find_code_mentions(pages, {s.cpt for s in services})
-        self.facts = case_facts(services, details or {})
+        self.facts = case_facts(services, details or {}) + list(extra_facts or [])
 
     def ask(self, question: str, k: int = 10, history: list[dict] | None = None,
             overview: str | None = None) -> AskResult:

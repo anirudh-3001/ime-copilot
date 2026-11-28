@@ -42,8 +42,9 @@ COVERAGE_QUERIES = [
 MAX_PASSAGES = 24
 
 _SUMMARY_SYSTEM = """You are an experienced medical-legal analyst helping a physician prepare an independent
-medical examination (IME). Below is a sample of one claim file: a fact sheet computed from every
-bill in the file, and numbered passages from the file's most relevant pages.
+medical examination (IME). Below is a sample of one claim file: a fact sheet computed from the whole file (bills and,
+when available, a dated list of every encounter with its providers, procedures, imaging and pain
+notes), and numbered passages from the file's most relevant pages.
 
 Write your own understanding of this case for the examining physician, in the structure you think
 fits this case best. Use short "## " headings, short paragraphs and "- " bullet points, each heading
@@ -59,6 +60,9 @@ visits for unrelated complaints, routine checkups): don't describe those as part
 Mention them briefly under their own heading only where they matter (for example a prior injury
 to the same body part, or a condition that could affect recovery).
 
+If the records show surgery, include a "Before and after surgery" section comparing the period
+before and after it: treatment received, providers, pain and function, and what changed.
+
 Rules:
 - Use only what the fact sheet and passages say; if something important is unclear or missing, say so.
 - After each statement, put the passage or fact number it came from in square brackets, e.g. [4] or [F2].
@@ -70,12 +74,17 @@ Rules:
 Reply with JSON only: {"summary": "<the summary, with [n] markers>"}"""
 
 
-def build_summary(engine, case_id: str) -> dict | None:
+def build_summary(engine, case_id: str, index_dir: str | Path | None = None) -> dict | None:
     case = get_case(engine, case_id)
     if case is None:
         return None
     pages = get_pages(engine, case_id)
     ledger = get_ledger(engine, case_id)
+    catalog = None
+    if index_dir is not None:
+        catalog = _catalog_for(engine, case_id, case, ledger, index_dir)
+        if catalog is not None:
+            ledger["services"] = ledger["services"] + catalog.pop("_extra_services")
 
     details = []
     for key, label in DETAIL_LABELS:
@@ -148,7 +157,28 @@ def build_summary(engine, case_id: str) -> dict | None:
         "diagnoses": diagnoses,
         "questions": [{"number": q["number"], "text": q["text"], "category": q.get("category"),
                        "page": q["page_no"]} for q in ledger["questions"]],
+        "catalog": catalog,
     }
+
+
+def _catalog_for(engine, case_id: str, case: dict, ledger: dict, index_dir) -> dict | None:
+    from .catalog import bill_rows, catalog_views, load_catalog
+    from .rag.service import load_case
+    entries = load_catalog(index_dir, case_id)
+    if not entries:
+        return None
+    pages, services = load_case(engine, case_id)
+    by_no = {p.page_no: p for p in pages}
+    extra = bill_rows(entries, by_no, services)
+    doi = ((case.get("details") or {}).get("date_of_injury") or {}).get("value")
+    doi = doi if doi and len(doi) == 10 and doi[4] == "-" else None
+    views = catalog_views(entries, list(services) + extra, doi)
+    views["_extra_services"] = [{"date_of_service": s.date_of_service, "cpt": s.cpt, "units": s.units,
+                                 "billed_amount": s.billed_amount, "provider": s.provider,
+                                 "page_no": s.citation.page_no, "quote": s.citation.quote, "method": "llm"}
+                                for s in extra]
+    views["bill_lines_added"] = len(extra)
+    return views
 
 
 def overview_path(index_dir: str | Path, case_id: str) -> Path:
@@ -176,13 +206,15 @@ def gather_passages(qa, queries=COVERAGE_QUERIES, per_query: int = 5, limit: int
 
 
 def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = "",
-                   on_progress=None, case_context: str = "") -> dict:
-    """Ask the model to write its own understanding of the case, then link it to pages and save it."""
+                   on_progress=None, case_context: str = "", timeline: list[dict] | None = None) -> dict:
+    """Ask the model to write its own understanding of the case, then link it to pages and save it.
+    timeline: dated encounters from the document catalog (whole file), given as citable facts."""
     from .rag.qa import _resolve_passage_markers, _unsupported_values, fix_time_spans
     if on_progress:
         on_progress(0, 1)
-    hits = gather_passages(qa)
-    facts = "\n".join(f"[F{i}] {f['text']}" for i, f in enumerate(qa.facts, 1)) or "none"
+    all_facts = list(qa.facts) + list(timeline or [])
+    hits = gather_passages(qa, limit=14 if timeline else MAX_PASSAGES)
+    facts = "\n".join(f"[F{i}] {f['text']}" for i, f in enumerate(all_facts, 1)) or "none"
     passages = "\n\n".join(f"[{i}] (p. {h.passage.page_no})\n{h.passage.text}" for i, h in enumerate(hits, 1))
     user = (f"{case_context}\n\nFACT SHEET (whole file):\n{facts}\n\nPASSAGES:\n{passages}").strip()
 
@@ -199,7 +231,7 @@ def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = 
         raw = ""
         out["warnings"].append(f"The model could not write the summary: {err}")
     if raw:
-        text, sources, bad = _resolve_passage_markers(raw, hits, qa.pages_by_no, qa.facts)
+        text, sources, bad = _resolve_passage_markers(raw, hits, qa.pages_by_no, all_facts)
         text, span_notes = fix_time_spans(text)
         out["warnings"] += span_notes
         out["text"] = text
@@ -216,7 +248,7 @@ def write_overview(qa, index_dir: str | Path, case_id: str, processed_at: str = 
             out["warnings"].append("The model didn't mark its sources, so this summary isn't linked to pages.")
         page_text = " ".join(qa.pages_by_no[x.page].text for x in sources if x.page in qa.pages_by_no)
         missing = _unsupported_values(text, page_text + " " + " ".join(h.passage.text for h in hits) + " "
-                                      + " ".join(f["text"] for f in qa.facts))
+                                      + " ".join(f["text"] for f in all_facts))
         if missing:
             out["warnings"].append("Check these in the file; they weren't found in the text the model read: "
                                    + ", ".join(missing[:8]))

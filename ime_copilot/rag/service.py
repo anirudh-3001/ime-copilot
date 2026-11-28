@@ -53,9 +53,23 @@ def get_qa(engine, case_id: str, settings, refresh: bool = False, on_progress=No
                 cache = DiskVectorCache(index_path(settings.index_dir, case_id, embed_model))
             from ..db import get_case
             details = (get_case(engine, case_id) or {}).get("details") or {}
+            services, extra = with_catalog(pages, services, details, settings.index_dir, case_id)
             _CACHE[case_id] = CaseQA(pages, services, gateway, vector_cache=cache, on_progress=on_progress,
-                                     details=details)
+                                     details=details, extra_facts=extra)
         return _CACHE[case_id]
+
+
+def with_catalog(pages, services, details, index_dir, case_id):
+    """If the document catalog exists: add the bill lines it found, and whole-file facts."""
+    from ..catalog import bill_rows, catalog_facts, catalog_views, load_catalog
+    entries = load_catalog(index_dir, case_id)
+    if not entries:
+        return services, []
+    by_no = {p.page_no: p for p in pages}
+    services = list(services) + bill_rows(entries, by_no, services)
+    doi = ((details or {}).get("date_of_injury") or {}).get("value")
+    doi = doi if doi and len(doi) == 10 and doi[4] == "-" else None
+    return services, catalog_facts(catalog_views(entries, services, doi), by_no)
 
 
 def forget(case_id: str) -> None:

@@ -36,6 +36,8 @@ Drop a PDF on the left. A progress card shows each step (reading, OCR, analysis,
 - *Billing*: totals by type and by CPT code (lines, units, amounts, dates, pages) and the top billing providers.
 - *Case & file*: patient, DOB, claim number, date of injury, employer, insurer, the IME referral questions, diagnosis codes, and pages that were hard to read.
 
+Below the written summary, the **document catalog** lists: surgeries (with cost), a **before and after surgery** comparison (visits, providers, treatment, billed amounts, pain notes), providers (role, facility, dates, visits, what they did, billed), billed amounts by provider or facility, procedures (date, CPT, provider, cost), imaging such as MRI with dates and impressions, all dates of service, and every document in the file with its page range. The catalog comes from one read of every page by the model (about 5–8 seconds per page, once per file, resumable); every item is checked against its page and dropped if it isn't there. It also adds bill lines from bill layouts the rule-based reader doesn't know, and gives the Q&A whole-file facts (all encounter dates, providers, surgeries, imaging).
+
 *Print* saves it as a PDF.
 
 **Finding a patient's file.** The case list shows the patient name found in each file, with date of injury, claim number and the original file name. Type in the search box to filter by name, claim number, date of birth, employer or file name. Click the ✎ pencil to change a label (the PDF itself is never renamed). Files processed before this version show a *Write summary* button.
