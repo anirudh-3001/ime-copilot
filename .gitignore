@@ -8,3 +8,6 @@ data/
 # Never commit patient files
 *.[Pp][Dd][Ff]
 !tests/fixtures/*.[Pp][Dd][Ff]
+
+# Reference PDFs (AMA Guides are copyrighted): never commit
+guides/

@@ -119,6 +119,37 @@ def _catalog(case_id: str, settings: Settings) -> None:
     _summarize(qa, case_id, settings)
 
 
+_RATING: dict[tuple, dict] = {}
+
+
+def rating_status(case_id: str, tab: str) -> dict | None:
+    with _LOCK:
+        r = _RATING.get((case_id, tab))
+        return dict(r) if r else None
+
+
+def start_rating(case_id: str, settings: Settings, tab: str) -> None:
+    """Prepare the AMA or Colorado rating worksheet in the background (does not block questions)."""
+    from .rating import prepare
+    with _LOCK:
+        _RATING[(case_id, tab)] = {"state": "working", "done": 0, "total": 3, "started": time.time()}
+
+    def progress(d, t):
+        with _LOCK:
+            _RATING[(case_id, tab)].update(done=d, total=t)
+
+    def run():
+        try:
+            prepare(case_id, settings, tab, on_progress=progress)
+            state = {"state": "done"}
+        except Exception as err:  # noqa: BLE001
+            state = {"state": "error", "error": f"{type(err).__name__}: {err}"}
+        with _LOCK:
+            _RATING[(case_id, tab)].update(state)
+
+    threading.Thread(target=run, name=f"ime-rating-{case_id}-{tab}", daemon=True).start()
+
+
 def start_catalog(case_id: str, settings: Settings) -> None:
     """Build (or finish) the document catalog for an already processed file, then rewrite the summary."""
     _update(case_id, "cataloguing", 0, 0)

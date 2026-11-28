@@ -40,6 +40,8 @@ Below the written summary, the **document catalog** lists: surgeries (with cost)
 
 *Print* saves it as a PDF.
 
+**AMA and Colorado rating tabs (draft for the rating physician).** Put the reference PDFs in `IME_GUIDES_DIR` (`AMA/` and `Colorado/` folders; scans are fine) and run `python -m ime_copilot guides` once to read and index them (scanned pages are OCR'd; citations use the printed page numbers). Each tab, on request, shows: (1) rating inputs from the records by body part (diagnoses, surgery, imaging, recorded range of motion, neurological findings, MMI statements, earlier ratings, prior injuries, restrictions), each with its page; (2) how to rate it: the sections and tables that apply, what to measure at the exam, what is present or missing, and cautions (Colorado: the DOWC Level II curriculum and Desk Aid 11 rules), each linked to a Guides page you can open; (3) a combined-values calculator (A + B × (100 − A) / 100, largest first). It never gives the rating itself. The AMA Guides are the AMA's copyrighted work: keep them on the local machine and confirm the license before wider use.
+
 **Finding a patient's file.** The case list shows the patient name found in each file, with date of injury, claim number and the original file name. Type in the search box to filter by name, claim number, date of birth, employer or file name. Click the ✎ pencil to change a label (the PDF itself is never renamed). Files processed before this version show a *Write summary* button.
 
 **Big files are processed once.** OCR results are cached in `data/ocr_cache` and search vectors in `data/index/<case>`. If processing stops (Mac sleeps, Ollama closes), running it again continues where it stopped. Restarting the server or `ask` afterwards loads the case in seconds.

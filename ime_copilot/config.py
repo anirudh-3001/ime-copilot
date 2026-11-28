@@ -70,6 +70,7 @@ class Settings:
     storage: str = "local"             # local | azure_blob
     local_storage_dir: str = "data/blobs"
     index_dir: str = "data/index"      # saved search vectors, one folder per case
+    guides_dir: str = "guides"         # AMA/ and Colorado/ reference PDFs (rating tabs)
     catalog: bool = True               # read every page once to list documents, providers, procedures
     catalog_workers: int = 1           # pages read at the same time (raise with OLLAMA_NUM_PARALLEL)
     max_upload_mb: int = 500
@@ -128,6 +129,7 @@ class Settings:
             storage=_env("IME_STORAGE", cls.storage),
             local_storage_dir=_env("IME_LOCAL_STORAGE_DIR", cls.local_storage_dir),
             index_dir=_env("IME_INDEX_DIR", cls.index_dir),
+            guides_dir=_env("IME_GUIDES_DIR", cls.guides_dir),
             catalog=_env("IME_CATALOG", "on").lower() not in ("off", "false", "0", "no"),
             catalog_workers=int(_env("IME_CATALOG_WORKERS", "1")),
             max_upload_mb=int(_env("IME_MAX_UPLOAD_MB", str(cls.max_upload_mb))),

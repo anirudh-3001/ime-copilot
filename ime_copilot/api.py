@@ -189,6 +189,56 @@ def rename_case(case_id: str, display_name: str = Body("", embed=True)) -> dict:
     return _case_or_404(case_id)
 
 
+@app.get("/cases/{case_id}/rating/{tab}", dependencies=[Depends(require_key)])
+def rating(case_id: str, tab: str) -> dict:
+    """The AMA or Colorado rating worksheet: inputs from the records + guidance from the reference library."""
+    from .guides import load_library
+    from .rating import TABS, load
+    _case_or_404(case_id)
+    if tab not in TABS:
+        raise HTTPException(status_code=404, detail="Unknown rating tab.")
+    job = jobs.rating_status(case_id, tab) or {}
+    s = settings()
+    return {"tab": tab, "title": TABS[tab]["title"],
+            "status": job.get("state") or ("done" if load(s, case_id, f"rating_{tab}") else "not_started"),
+            "progress": {"done": job.get("done", 0), "total": job.get("total", 3)}, "error": job.get("error"),
+            "findings": load(s, case_id, "rating_findings"), "guidance": load(s, case_id, f"rating_{tab}"),
+            "library_ready": all(load_library(s, lib) for lib in TABS[tab]["libraries"]),
+            "model_available": s.provider != "none"}
+
+
+@app.post("/cases/{case_id}/rating/{tab}", dependencies=[Depends(require_key)])
+def prepare_rating(case_id: str, tab: str, refresh_findings: bool = Body(False, embed=True)) -> dict:
+    """Prepare (or redo) the worksheet in the background."""
+    from pathlib import Path as _P
+    from .rating import TABS
+    _case_or_404(case_id)
+    if tab not in TABS:
+        raise HTTPException(status_code=404, detail="Unknown rating tab.")
+    if settings().provider == "none":
+        raise HTTPException(status_code=400, detail="The rating worksheet needs a model (IME_PROVIDER=local).")
+    if (jobs.rating_status(case_id, tab) or {}).get("state") == "working" or jobs.is_running(case_id):
+        raise HTTPException(status_code=409, detail="Busy; try again in a moment.")
+    if refresh_findings:
+        (_P(settings().index_dir) / case_id / "rating_findings.json").unlink(missing_ok=True)
+    jobs.start_rating(case_id, settings(), tab)
+    return {"status": "working"}
+
+
+@app.get("/guides/{library}/pages/{gid}", dependencies=[Depends(require_key)])
+def guide_page(library: str, gid: int) -> dict:
+    """One page of the reference library (for the page viewer)."""
+    from .guides import LIBRARIES, cite_label, load_library
+    if library not in LIBRARIES:
+        raise HTTPException(status_code=404, detail="Unknown library.")
+    pages = load_library(settings(), library)
+    page = next((p for p in pages if p["gid"] == gid), None)
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found.")
+    return {"gid": gid, "label": cite_label(library, page), "file": page["file"], "pdf_page": page["pdf_page"],
+            "printed_page": page.get("printed_page"), "text": page["text"], "count": len(pages)}
+
+
 @app.get("/cases/{case_id}", dependencies=[Depends(require_key)])
 def case(case_id: str) -> dict:
     return _case_or_404(case_id)

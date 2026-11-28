@@ -54,6 +54,20 @@
   .rename { padding:6px 10px; } .rename input { padding-left:9px; }
   .count { float:right; text-transform:none; letter-spacing:0; font-weight:500; }
   details.sec > summary { cursor:pointer; }
+  .draft { padding:9px 12px; border-radius:9px; background:var(--warn-soft); color:var(--warn); font-size:13.5px; margin-bottom:10px; }
+  .bp { border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin:10px 0; }
+  .bp h5 { margin:10px 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .bp ul { margin:4px 0; padding-left:20px; } .bp li { margin:3px 0; }
+  .bpname { margin:0 0 6px; font-size:15px; }
+  .kv.wide { grid-template-columns:190px 1fr; } .kv.wide dd ul { margin:0; padding-left:18px; }
+  ul.check { list-style:none; padding-left:2px; } ul.check input { margin-right:6px; }
+  .gref { display:inline-block; padding:0 6px; margin:0 1px; border-radius:6px; border:0; background:var(--ok-soft); color:var(--ok);
+    font-size:12.5px; font-weight:600; line-height:1.6; white-space:nowrap; }
+  .gref:hover { outline:1px solid var(--ok); }
+  table.calc input { width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:7px; background:var(--sunk); color:var(--text); font:inherit; }
+  table.calc td:nth-child(2), table.calc td:nth-child(3) { width:140px; } table.calc td:nth-child(4) { width:110px; }
+  .calcres { margin-top:10px; } .calcres .total { font-size:16px; margin-bottom:4px; }
+  @media (max-width: 760px) { .kv.wide { grid-template-columns:1fr; } }
   details.sec > summary h5 { margin:0; }
   .md h3 { font-size:14.5px; margin:14px 0 4px; } .md h3:first-child { margin-top:0; }
   .md ul { margin:4px 0 8px; padding-left:20px; } .md li { margin:2px 0; } .md p { margin:4px 0 8px; }
@@ -479,8 +493,11 @@ function highlight(text, quote) {
   try { return safe.replace(new RegExp(words.join('\\s+'), 'i'), m => `<mark>${m}</mark>`); } catch (e) { return safe; }
 }
 $('closeV').onclick = () => { $('viewer').classList.remove('open'); $('viewer').setAttribute('aria-hidden', 'true'); };
-$('prevPg').onclick = () => { const v = state.viewer; if (v && v.n > 1) openPage(v.caseId, v.n - 1); };
-$('nextPg').onclick = () => { const v = state.viewer; if (v && (!state.pageCount || v.n < state.pageCount)) openPage(v.caseId, v.n + 1); };
+$('prevPg').onclick = () => { const v = state.viewer; if (!v) return;
+  if (v.guide) { if (v.gid > 1) openGuide(v.lib, v.gid - 1); } else if (v.n > 1) openPage(v.caseId, v.n - 1); };
+$('nextPg').onclick = () => { const v = state.viewer; if (!v) return;
+  if (v.guide) { if (!v.count || v.gid < v.count) openGuide(v.lib, v.gid + 1); }
+  else if (!state.pageCount || v.n < state.pageCount) openPage(v.caseId, v.n + 1); };
 document.addEventListener('keydown', ev => { if (ev.key === 'Escape') $('closeV').click(); });
 
 
@@ -518,18 +535,23 @@ function renderSummary(d, caseId) {
     `<span class="fact"><span>Pages</span>${f.file.pages.toLocaleString()}</span>` +
     (f.billing.lines ? `<span class="fact"><span>Billed</span>${money(f.billing.total)}</span>` : '');
 
-  const tabs = [['summary', 'Summary'], ['billing', `Billing (${f.billing.by_code.length} codes)`], ['file', 'Case & file']];
+  const tabs = [['summary', 'Summary'], ['ama', 'AMA rating'], ['colorado', 'Colorado rating'],
+                ['billing', `Billing (${f.billing.by_code.length} codes)`], ['file', 'Case & file']];
   const pane = id => `class="tabpane" data-pane="${id}" ${sumTab === id ? '' : 'hidden'}`;
   $('sumBody').innerHTML = `<div class="tabs" role="tablist">${tabs.map(([id, label]) =>
       `<button class="tab${sumTab === id ? ' active' : ''}" data-tab="${id}" role="tab">${esc(label)}</button>`).join('')}</div>
     <div ${pane('summary')}>${overviewHtml(d)}${catalogHtml(d)}</div>
+    <div ${pane('ama')}></div>
+    <div ${pane('colorado')}></div>
     <div ${pane('billing')}>${billingHtml(f)}</div>
     <div ${pane('file')}>${fileHtml(f)}</div>`;
   $('sumBody').querySelectorAll('.tab').forEach(b => b.onclick = () => {
     sumTab = b.dataset.tab;
     $('sumBody').querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
     $('sumBody').querySelectorAll('.tabpane').forEach(x => x.hidden = x.dataset.pane !== sumTab);
+    if (sumTab === 'ama' || sumTab === 'colorado') loadRating(caseId, sumTab);
   });
+  ['ama', 'colorado'].forEach(t => { if (ratingCache[caseId + '|' + t] || sumTab === t) loadRating(caseId, t); });
   $('sumBody').querySelectorAll('.pg').forEach(b => b.onclick = () => openPage(caseId, +b.dataset.page, b.dataset.quote));
   const cb = $('buildCatalog'); if (cb) cb.onclick = async () => {
     cb.disabled = true;
@@ -661,6 +683,171 @@ function catalogHtml(d) {
     ${c.unattributed_billed ? `${money(c.unattributed_billed)} billed without a named provider.` : ''}</span>
     <button class="btn ghost" id="buildCatalog">Update catalog</button></div>`;
   return html;
+}
+
+/* ---------------- AMA / Colorado rating tabs */
+const ratingCache = {};            // `${caseId}|${tab}` -> last response
+const calcRows = {};               // `${caseId}|${tab}` -> [{label, value, factor}]
+let ratingTimer = {};
+
+function combineValues(values) {
+  const vals = values.map(v => Math.round(v)).filter(v => v > 0).sort((a, b) => b - a);
+  if (!vals.length) return {total: 0, steps: []};
+  let total = vals[0]; const steps = [];
+  for (const v of vals.slice(1)) {
+    const next = Math.round(total + v * (100 - total) / 100);
+    steps.push(`${total}% combined with ${v}% = ${next}%`);
+    total = next;
+  }
+  return {total, steps};
+}
+
+function gref(c) {
+  return `<button class="gref" data-lib="${esc(c.library)}" data-gid="${c.gid}" data-quote="${esc(c.quote || '')}">${esc(c.label)}</button>`;
+}
+function guideText(it) {
+  if (!it) return '';
+  const refs = [...new Map((it.cites || []).map(c => [c.label, c])).values()];
+  let text = esc(it.text || '');
+  refs.forEach(c => { text = text.split('(' + esc(c.label) + ')').join(gref(c)); });
+  return text + (it.cited ? '' : ' <span class="badge warn" title="The model gave no valid Guides page for this">no Guides citation</span>');
+}
+function recordItem(it) {
+  return withPages(it.text, it.sources);
+}
+
+async function loadRating(caseId, tab, force) {
+  const key = caseId + '|' + tab;
+  clearTimeout(ratingTimer[key]);
+  if (!force && ratingCache[key] && ratingCache[key].status === 'done') { renderRating(caseId, tab); return; }
+  try { ratingCache[key] = await api(`/cases/${encodeURIComponent(caseId)}/rating/${tab}`); }
+  catch (e) { ratingCache[key] = {status: 'error', error: e.message}; }
+  renderRating(caseId, tab);
+  if (ratingCache[key].status === 'working') ratingTimer[key] = setTimeout(() => loadRating(caseId, tab, true), 4000);
+}
+
+async function startRating(caseId, tab, refreshFindings) {
+  try {
+    await api(`/cases/${encodeURIComponent(caseId)}/rating/${tab}`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({refresh_findings: !!refreshFindings})});
+  } catch (e) { alert(e.message); }
+  loadRating(caseId, tab, true);
+}
+
+function renderRating(caseId, tab) {
+  const el = document.querySelector(`.tabpane[data-pane="${tab}"]`);
+  if (!el || state.current !== caseId) return;
+  const d = ratingCache[caseId + '|' + tab] || {};
+  const banner = `<div class="draft"><b>Draft for the rating physician.</b> The impairment rating is the physician's determination.
+    Record findings link to claim-file pages; guidance links to pages of the reference library, which stays on this computer.</div>`;
+  if (d.model_available === false) { el.innerHTML = banner + '<div class="muted">This tab needs a model (IME_PROVIDER=local).</div>'; return; }
+  if (d.status === 'working') {
+    const p = d.progress || {};
+    const msg = ['Checking the reference library', 'Reading the records for rating inputs', 'Matching them to the Guides', 'Finishing'][p.done || 0];
+    el.innerHTML = banner + `<div class="writing"><span class="dots"><i></i><i></i><i></i></span>${msg}… (usually 2–4 minutes;
+      the first time, the reference PDFs are read and indexed first, which takes longer). Questions still work.</div>`;
+    return;
+  }
+  if (d.status !== 'done' || !d.guidance) {
+    el.innerHTML = banner + `${d.error ? `<div class="warning">${esc(d.error)}</div>` : ''}
+      <p class="muted">Prepares a worksheet: rating inputs found in this file (by body part, with pages), which sections and
+      tables of the ${tab === 'colorado' ? 'AMA Guides 3rd Ed. (Revised) and Colorado DOWC rules' : 'AMA Guides'} apply,
+      what to measure at the exam, and a combined-values calculator.</p>
+      ${d.library_ready === false ? '<p class="muted small">The reference library will be read first (one time).</p>' : ''}
+      <button class="btn rate-go">Prepare worksheet</button>`;
+    el.querySelector('.rate-go').onclick = () => startRating(caseId, tab);
+    return;
+  }
+  const g = d.guidance, f = d.findings || {body_parts: []};
+  const FIELDS = [['diagnoses', 'Diagnoses'], ['surgery', 'Surgery / procedures'], ['imaging', 'Imaging and tests'],
+    ['range_of_motion', 'Range of motion recorded'], ['neuro', 'Neurological findings'], ['mmi', 'MMI statements'],
+    ['prior_ratings', 'Earlier impairment ratings'], ['prior_injuries', 'Prior injuries / apportionment'], ['restrictions', 'Restrictions']];
+
+  const records = f.body_parts.length ? f.body_parts.map(bp => `<div class="bp"><h4 class="bpname">${esc(bp.name)}</h4><dl class="kv wide">
+      ${FIELDS.filter(([k]) => (bp[k] || []).length).map(([k, label]) => `<dt>${label}</dt><dd><ul>${bp[k].map(it => `<li>${recordItem(it)}</li>`).join('')}</ul></dd>`).join('')}
+    </dl></div>`).join('') : '<div class="muted">No rating inputs were found in the records.</div>';
+
+  const guidance = g.body_parts.map(bp => `<div class="bp"><h4 class="bpname">${esc(bp.name)}</h4>
+      ${bp.method ? `<p>${guideText(bp.method)}</p>` : ''}
+      ${bp.tables.length ? `<h5>Tables and figures</h5><ul>${bp.tables.map(t => `<li><b>${esc(t.name)}</b>: ${guideText(t)}</li>`).join('')}</ul>` : ''}
+      ${bp.measure_at_exam.length ? `<h5>Measure or document at the exam</h5><ul class="check">${bp.measure_at_exam.map((it, i) =>
+          `<li><label><input type="checkbox"> ${guideText(it)}</label></li>`).join('')}</ul>` : ''}
+      <div class="grid2">
+        ${bp.inputs_present.length ? `<div><h5>Already in the records</h5><ul>${bp.inputs_present.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+        ${bp.inputs_missing.length ? `<div><h5>Missing from the records</h5><ul>${bp.inputs_missing.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+      </div>
+      ${bp.notes.length ? `<h5>${tab === 'colorado' ? 'Colorado rules and cautions' : 'Notes and cautions'}</h5><ul>${bp.notes.map(it => `<li>${guideText(it)}</li>`).join('')}</ul>` : ''}
+    </div>`).join('') || '<div class="muted">No guidance was produced.</div>';
+  const general = g.general.length ? `<div class="bp"><h4 class="bpname">Whole rating</h4><ul>${g.general.map(it => `<li>${guideText(it)}</li>`).join('')}</ul></div>` : '';
+
+  el.innerHTML = banner +
+    `${(g.warnings || []).map(w => `<div class="warning">${esc(w)}</div>`).join('')}
+    <details class="sec" open><summary><h5 style="display:inline">1. Rating inputs from the records</h5></summary>${records}
+      ${f.dropped ? `<p class="muted small">${f.dropped} item(s) without a source in the file were left out.</p>` : ''}</details>
+    <details class="sec" open><summary><h5 style="display:inline">2. How to rate it: ${esc(g.title)}</h5></summary>${guidance}${general}
+      ${g.uncited ? `<p class="muted small">${g.uncited} statement(s) have no valid Guides citation (marked); check them in the Guides.</p>` : ''}</details>
+    <details class="sec" open><summary><h5 style="display:inline">3. Combined values calculator</h5></summary>${calcHtml(caseId, tab)}</details>
+    <div class="badges"><span class="muted small">${esc(g.model || '')} · reference pages read: ${(g.reference_pages || []).length}</span>
+      <button class="btn ghost rate-redo">Redo guidance</button><button class="btn ghost rate-reread">Re-read the records</button></div>`;
+  el.querySelectorAll('.pg').forEach(b => b.onclick = () => openPage(caseId, +b.dataset.page, b.dataset.quote));
+  el.querySelectorAll('.gref').forEach(b => b.onclick = () => openGuide(b.dataset.lib, +b.dataset.gid, b.dataset.quote));
+  el.querySelector('.rate-redo').onclick = () => startRating(caseId, tab, false);
+  el.querySelector('.rate-reread').onclick = () => startRating(caseId, tab, true);
+  wireCalc(el, caseId, tab);
+}
+
+function calcHtml(caseId, tab) {
+  const key = caseId + '|' + tab;
+  const rows = calcRows[key] = calcRows[key] || [{label: '', value: '', factor: ''}, {label: '', value: '', factor: ''}];
+  return `<p class="muted small">Enter each impairment the physician has determined. For a regional value (e.g. upper extremity), enter the
+    conversion percentage from the Guides' conversion table to get the whole-person value. Values are combined largest first:
+    A + B × (100 − A) / 100, rounded at each step.</p>
+    <table class="calc"><thead><tr><th>Impairment</th><th>Value %</th><th>Convert to whole person (% factor, optional)</th><th>Whole person %</th><th></th></tr></thead>
+    <tbody>${rows.map((r, i) => `<tr data-i="${i}"><td><input class="c-label" value="${esc(r.label)}" placeholder="e.g. Lumbar spine, Table 53 + ROM"></td>
+      <td><input class="c-val" type="number" min="0" max="100" step="1" value="${esc(r.value)}"></td>
+      <td><input class="c-fac" type="number" min="0" max="100" step="1" value="${esc(r.factor)}" placeholder="e.g. 60"></td>
+      <td class="num c-wp"></td><td><button class="btn ghost c-del" title="Remove">✕</button></td></tr>`).join('')}</tbody></table>
+    <button class="btn ghost c-add" style="margin-top:6px">Add impairment</button>
+    <div class="calcres"></div>`;
+}
+
+function wireCalc(el, caseId, tab) {
+  const key = caseId + '|' + tab;
+  const update = () => {
+    const rows = calcRows[key];
+    el.querySelectorAll('table.calc tbody tr').forEach(tr => {
+      const r = rows[+tr.dataset.i];
+      r.label = tr.querySelector('.c-label').value; r.value = tr.querySelector('.c-val').value; r.factor = tr.querySelector('.c-fac').value;
+      const v = parseFloat(r.value), fac = parseFloat(r.factor);
+      r.wp = isNaN(v) ? null : Math.round(isNaN(fac) ? v : v * fac / 100);
+      tr.querySelector('.c-wp').textContent = r.wp == null ? '' : r.wp + '%';
+    });
+    const res = combineValues(rows.map(r => r.wp || 0));
+    el.querySelector('.calcres').innerHTML = res.total ? `<div class="total">Combined whole-person impairment: <b>${res.total}%</b></div>
+      ${res.steps.length ? `<div class="muted small">${res.steps.map(esc).join('<br>')}</div>` : ''}
+      <div class="muted small">Check against the Combined Values Chart in the Guides before reporting.</div>` : '';
+  };
+  el.querySelectorAll('table.calc input').forEach(i => i.oninput = update);
+  el.querySelector('.c-add').onclick = () => { calcRows[key].push({label: '', value: '', factor: ''}); renderRating(caseId, tab); };
+  el.querySelectorAll('.c-del').forEach(b => b.onclick = () => {
+    calcRows[key].splice(+b.closest('tr').dataset.i, 1);
+    if (!calcRows[key].length) calcRows[key].push({label: '', value: '', factor: ''});
+    renderRating(caseId, tab);
+  });
+  update();
+}
+
+async function openGuide(lib, gid, quote) {
+  state.viewer = {guide: true, lib, gid};
+  $('viewer').classList.add('open'); $('viewer').setAttribute('aria-hidden', 'false');
+  $('vTitle').textContent = 'Reference page'; $('vText').textContent = 'Loading…';
+  try {
+    const p = await api(`/guides/${encodeURIComponent(lib)}/pages/${gid}`);
+    state.viewer.count = p.count;
+    $('vTitle').textContent = `${p.label} · ${p.file}, PDF p. ${p.pdf_page}`;
+    $('vText').innerHTML = highlight(p.text || '(no text on this page)', quote);
+    const m = $('vText').querySelector('mark'); if (m) m.scrollIntoView({block: 'center'});
+  } catch (e) { $('vText').textContent = e.message; }
 }
 
 function billingHtml(f) {

@@ -52,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
     sub.add_parser("eval-qa", help="Score question answering on the synthetic case (pages + CPT codes)")
+    sub.add_parser("guides", help="Read and index the AMA / Colorado reference PDFs (IME_GUIDES_DIR)")
 
     args = parser.parse_args(argv)
     settings = Settings.from_env()
@@ -62,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ask":
         return _ask(args, settings)
+
+    if args.cmd == "guides":
+        from .guides import main as guides_main
+        return guides_main(settings)
 
     if args.cmd == "eval-qa":
         from .rag.evalqa import run_eval_qa
